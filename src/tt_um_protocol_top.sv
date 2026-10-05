@@ -1,6 +1,6 @@
 `default_nettype none
 
-module protocol_top #(
+module tt_um_protocol_top #(
     parameter integer IMEM_AW    = 8,
     parameter integer FIFO_DEPTH = 4
 ) (

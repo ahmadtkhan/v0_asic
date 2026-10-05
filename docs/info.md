@@ -9,12 +9,12 @@ You can also include images in this folder and reference them in the markdown. E
 
 ## How it works
 
-Explain how your project works
+As an protocol emulator it lies on general instructions rather than protocol specific instructions and is a harvard architecture. 
 
 ## How to test
 
-Explain how to use your project
+The testing protocol has not been reached yet since there is an initial prototype iteration. Although going forward the testing will be done using provided scripts which will either be possible on ASIC or using opensource tools such as iVerilog. 
 
 ## External hardware
 
-List external hardware used in your project (e.g. PMOD, LED display, etc), if any
+So far there is no external hardware for this project.
