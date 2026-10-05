@@ -4,9 +4,9 @@
 # defaults
 SIM ?= icarus
 FST ?= -fst # Use more efficient FST format
-TOPLEVEL_LANG ?= verilog
+TOPLEVEL_LANG ?= SystemVerilog
 SRC_DIR = $(PWD)/../src
-PROJECT_SOURCES = project.v
+PROJECT_SOURCES = tt_um_protocol_top.sv protocol_top.sv protocol_core.sv proto_tick.sv proto_shift.sv proto_pkg.sv proto_gpio.sv proto_fifo.sv instruction_memory.sv instruction_decoder.sv config_regs.sv
 
 ifneq ($(GATES),yes)
 
