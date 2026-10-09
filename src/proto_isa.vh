@@ -1,26 +1,11 @@
-`ifndef PROTO_PKG_SV
-`define PROTO_PKG_SV
+`ifndef PROTO_ISA_VH
+`define PROTO_ISA_VH
 
-// -----------------------------------------------------------------------------
-// Protocol-wide constants.
-//
-// This file intentionally does not use a SystemVerilog package. It is a plain
-// Verilog/SystemVerilog include file containing only preprocessor constants.
-// Include it in any RTL source that needs these definitions:
-//
-//     `include "proto_pkg.sv"
-//
-// Keeping the values here avoids duplicated magic numbers while remaining
-// compatible with a simple Yosys / Icarus Verilog flow.
-// -----------------------------------------------------------------------------
+// Protocol-emulator V0 ISA constants.
+// The ISA is deliberately separate from proto_params.vh: changing a FIFO or
+// memory depth must not silently change instruction encodings.
 
-// Common widths.
-`define PROTO_INSTR_W 16
-`define PROTO_GPIO_W   8
-`define PROTO_DATA_W   8
-`define PROTO_IMEM_AW  8
-
-// Opcodes.
+// Opcodes: instr[15:11]
 `define OP_NOP         5'h00
 `define OP_HALT        5'h01
 `define OP_WAIT        5'h02
@@ -50,7 +35,6 @@
 `define OP_STORE       5'h18
 
 // Conditions used by JCC and WAITPIN.
-// WAITPIN only meaningfully uses the PIN_* values.
 `define COND_ZERO      3'd0
 `define COND_NZERO     3'd1
 `define COND_PIN_LOW   3'd2
@@ -60,14 +44,13 @@
 `define COND_TX_EMPTY  3'd6
 `define COND_RX_FULL   3'd7
 
-// Register selectors.
+// General register selectors.
 `define REG_X          3'd0
 `define REG_Y          3'd1
 `define REG_LC         3'd2
 `define REG_ZERO       3'd7
 
-// Byte-addressed configuration space. OP_CFG remains compact:
-// [10:8] configuration byte address, [7:0] data.
+// Byte-addressed configuration space used by OP_CFG.
 `define CFG_CLKDIV_LO  3'd0
 `define CFG_CLKDIV_HI  3'd1
 `define CFG_PINMAP0    3'd2

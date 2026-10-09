@@ -4,7 +4,7 @@ project:
   author:       "Ahmad Khan"      # Your name
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
   description:  "Initial version 0 of Emulator ASIC currently supporting operations for SPI, I2C and UART"      # One line description of what your project does
-  language:     "SystemVerilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
+  language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
   clock_hz:     50000000       # Clock frequency in Hz (or 0 if not applicable)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
@@ -17,50 +17,45 @@ project:
   # Source files must be in ./src and you must list each source file separately, one per line.
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
-    - "tt_um_protocol_top.sv"
-    - "protocol_top.sv"
-    - "protocol_core.sv"
-    - "proto_tick.sv"
-    - "proto_shift.sv"
-    - "proto_pkg.sv"
-    - "proto_gpio.sv"
-    - "proto_fifo.sv"
-    - "instruction_memory.sv"
-    - "instruction_decoder.sv"
-    - "config_regs.sv"
+    - "tt_um_protocol_top.v"
+    - "protocol_top.v"
+    - "protocol_core.v"
+    - "proto_tick.v"
+    - "proto_shift.v"
+    - "proto_gpio.v"
+    - "proto_fifo.v"
+    - "instruction_memory.v"
+    - "instruction_decoder.v"
+    - "config_regs.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
-  # Inputs
-  ui[0]: "pad_in[0]"
-  ui[1]: "pad_in[1]"
-  ui[2]: "pad_in[2]"
-  ui[3]: "pad_in[3]"
-  ui[4]: "pad_in[4]"
-  ui[5]: "pad_in[5]"
-  ui[6]: "pad_in[6]"
-  ui[7]: "pad_in[7]"
+  ui[0]: "HOST_ARG0"
+  ui[1]: "HOST_ARG1"
+  ui[2]: "HOST_ARG2"
+  ui[3]: "HOST_SHOW_RX"
+  ui[4]: "HOST_CMD0"
+  ui[5]: "HOST_CMD1"
+  ui[6]: "HOST_CMD2"
+  ui[7]: "HOST_STROBE"
 
-  # Outputs
-  uo[0]: "pad_out[0]"
-  uo[1]: "pad_out[1]"
-  uo[2]: "pad_out[2]"
-  uo[3]: "pad_out[3]"
-  uo[4]: "pad_out[4]"
-  uo[5]: "pad_out[5]"
-  uo[6]: "pad_out[6]"
-  uo[7]: "pad_out[7]"
+  uo[0]: "BUSY / RX_DATA0"
+  uo[1]: "FAULT / RX_DATA1"
+  uo[2]: "PROG_READY / RX_DATA2"
+  uo[3]: "CFG_READY / RX_DATA3"
+  uo[4]: "TX_FULL / RX_DATA4"
+  uo[5]: "RX_EMPTY / RX_DATA5"
+  uo[6]: "0 / RX_DATA6"
+  uo[7]: "0 / RX_DATA7"
 
-  # Bidirectional pins
-  uio[0]: "pad_oe[0]"
-  uio[1]: "pad_oe[1]"
-  uio[2]: "pad_oe[2]"
-  uio[3]: "pad_oe[3]"
-  uio[4]: "pad_oe[4]"
-  uio[5]: "pad_oe[5]"
-  uio[6]: "pad_oe[6]"
-  uio[7]: "pad_oe[7]"
-
+  uio[0]: "GPIO0 / HOST_DATA0"
+  uio[1]: "GPIO1 / HOST_DATA1"
+  uio[2]: "GPIO2 / HOST_DATA2"
+  uio[3]: "GPIO3 / HOST_DATA3"
+  uio[4]: "GPIO4 / HOST_DATA4"
+  uio[5]: "GPIO5 / HOST_DATA5"
+  uio[6]: "GPIO6 / HOST_DATA6"
+  uio[7]: "GPIO7 / HOST_DATA7"
 # Do not change!
 yaml_version: 6

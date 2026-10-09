@@ -1,107 +1,99 @@
 `default_nettype none
+`include "proto_params.vh"
 
+// Technology-independent integration top.  This deliberately keeps the rich
+// host/programming interface separate from the Tiny Tapeout physical pin map.
 module protocol_top #(
-    parameter integer IMEM_AW    = 8,
-    parameter integer FIFO_DEPTH = 4
+    parameter integer IMEM_AW    = `PROTO_IMEM_AW,
+    parameter integer IMEM_DEPTH = `PROTO_IMEM_DEPTH,
+    parameter integer FIFO_DEPTH = `PROTO_FIFO_DEPTH
 ) (
-    input  wire                 clk,
-    input  wire                 rst_n,
+    input  wire                         clk,
+    input  wire                         rst_n,
 
-    // Core control/status.
-    input  wire                 start,
-    output wire                 busy,
-    output wire                 fault,
+    input  wire                         start,
+    output wire                         busy,
+    output wire                         fault,
 
-    // Program loader. Writes are accepted only while !busy.
-    input  wire                 prog_we,
-    input  wire [IMEM_AW-1:0]   prog_addr,
-    input  wire [15:0]          prog_wdata,
-    output wire                 prog_ready,
+    input  wire                         prog_we,
+    input  wire [IMEM_AW-1:0]           prog_addr,
+    input  wire [`PROTO_INSTR_W-1:0]    prog_wdata,
+    output wire                         prog_ready,
 
-    // Host configuration access. Writes are accepted only while !busy.
-    input  wire                 cfg_host_we,
-    input  wire [2:0]           cfg_host_addr,
-    input  wire [7:0]           cfg_host_wdata,
-    output wire [7:0]           cfg_host_rdata,
-    output wire                 cfg_host_ready,
+    input  wire                         cfg_host_we,
+    input  wire [`PROTO_CFG_AW-1:0]     cfg_host_addr,
+    input  wire [`PROTO_DATA_W-1:0]     cfg_host_wdata,
+    output wire [`PROTO_DATA_W-1:0]     cfg_host_rdata,
+    output wire                         cfg_host_ready,
 
-    // Host-facing data queues.
-    input  wire                 tx_push,
-    input  wire [7:0]           tx_data,
-    output wire                 tx_full,
+    input  wire                         tx_push,
+    input  wire [`PROTO_DATA_W-1:0]     tx_data,
+    output wire                         tx_full,
 
-    input  wire                 rx_pop,
-    output wire [7:0]           rx_data,
-    output wire                 rx_empty,
+    input  wire                         rx_pop,
+    output wire [`PROTO_DATA_W-1:0]     rx_data,
+    output wire                         rx_empty,
 
-    // Eight protocol GPIOs. Map these onto Tiny Tapeout uio_* in project.v.
-    input  wire [7:0]           pad_in,
-    output wire [7:0]           pad_out,
-    output wire [7:0]           pad_oe
+    input  wire [`PROTO_GPIO_W-1:0]     pad_in,
+    output wire [`PROTO_GPIO_W-1:0]     pad_out,
+    output wire [`PROTO_GPIO_W-1:0]     pad_oe
 );
 
-    // Instruction memory.
-    wire                 imem_req;
-    wire [IMEM_AW-1:0]   imem_addr;
-    wire [15:0]          imem_rdata;
-    wire                 imem_rvalid;
+    wire                         imem_req;
+    wire [IMEM_AW-1:0]           imem_addr;
+    wire [`PROTO_INSTR_W-1:0]    imem_rdata;
+    wire                         imem_rvalid;
 
-    // Configuration.
-    wire                 core_cfg_we;
-    wire [2:0]           core_cfg_addr;
-    wire [7:0]           core_cfg_wdata;
-    wire [15:0]          clkdiv;
-    wire [2:0]           out_pin;
-    wire [2:0]           in_pin;
-    wire [2:0]           side_pin;
-    wire                 out_shift_right;
-    wire                 in_shift_right;
-    wire                 side_enable;
-    wire                 side_target_oe;
-    wire [7:0]           open_drain_mask;
-    wire [2:0]           jmp_pin;
+    wire                         core_cfg_we;
+    wire [`PROTO_CFG_AW-1:0]     core_cfg_addr;
+    wire [`PROTO_DATA_W-1:0]     core_cfg_wdata;
+    wire [`PROTO_TICK_W-1:0]     clkdiv;
+    wire [2:0]                   out_pin;
+    wire [2:0]                   in_pin;
+    wire [2:0]                   side_pin;
+    wire                         out_shift_right;
+    wire                         in_shift_right;
+    wire                         side_enable;
+    wire                         side_target_oe;
+    wire [`PROTO_GPIO_W-1:0]     open_drain_mask;
+    wire [2:0]                   jmp_pin;
 
-    // Timing.
-    wire tick;
+    wire                         tick;
 
-    // GPIO internal signals.
-    wire [7:0] gpio_in;
-    wire [7:0] gpio_out;
-    wire [7:0] gpio_oe;
-    wire [7:0] gpio_rise;
-    wire [7:0] gpio_fall;
-    wire       gpio_out_we;
-    wire [7:0] gpio_out_wdata;
-    wire       gpio_oe_we;
-    wire [7:0] gpio_oe_wdata;
+    wire [`PROTO_GPIO_W-1:0]     gpio_in;
+    wire [`PROTO_GPIO_W-1:0]     gpio_out;
+    wire [`PROTO_GPIO_W-1:0]     gpio_oe;
+    wire [`PROTO_GPIO_W-1:0]     gpio_rise;
+    wire [`PROTO_GPIO_W-1:0]     gpio_fall;
+    wire                         gpio_out_we;
+    wire [`PROTO_GPIO_W-1:0]     gpio_out_wdata;
+    wire                         gpio_oe_we;
+    wire [`PROTO_GPIO_W-1:0]     gpio_oe_wdata;
 
-    // Shift engine.
-    wire       osr_load;
-    wire [7:0] osr_load_data;
-    wire       osr_shift;
-    wire       isr_clear;
-    wire       isr_shift;
-    wire       shift_serial_in;
-    wire       shift_serial_out;
-    wire [7:0] osr_value;
-    wire [7:0] isr_value;
+    wire                         osr_load;
+    wire [`PROTO_SHIFT_W-1:0]    osr_load_data;
+    wire                         osr_shift;
+    wire                         isr_clear;
+    wire                         isr_shift;
+    wire                         shift_serial_in;
+    wire                         shift_serial_out;
+    wire [`PROTO_SHIFT_W-1:0]    osr_value;
+    wire [`PROTO_SHIFT_W-1:0]    isr_value;
 
-    // TX FIFO.
-    wire       tx_pop;
-    wire [7:0] tx_pop_data;
-    wire       tx_empty;
+    wire                         tx_pop;
+    wire [`PROTO_DATA_W-1:0]     tx_pop_data;
+    wire                         tx_empty;
 
-    // RX FIFO.
-    wire       rx_push;
-    wire [7:0] rx_push_data;
-    wire       rx_full;
+    wire                         rx_push;
+    wire [`PROTO_DATA_W-1:0]     rx_push_data;
+    wire                         rx_full;
 
     assign prog_ready     = ~busy;
     assign cfg_host_ready = ~busy;
 
     instruction_memory #(
-        .AW(IMEM_AW),
-        .DEPTH(1 << IMEM_AW)
+        .AW    (IMEM_AW),
+        .DEPTH (IMEM_DEPTH)
     ) u_imem (
         .clk         (clk),
         .rst_n       (rst_n),
@@ -137,7 +129,7 @@ module protocol_top #(
     );
 
     proto_tick #(
-        .WIDTH(16)
+        .WIDTH (`PROTO_TICK_W)
     ) u_tick (
         .clk     (clk),
         .rst_n   (rst_n),
@@ -146,7 +138,7 @@ module protocol_top #(
     );
 
     proto_gpio #(
-        .N(8)
+        .N (`PROTO_GPIO_W)
     ) u_gpio (
         .clk             (clk),
         .rst_n           (rst_n),
@@ -166,7 +158,7 @@ module protocol_top #(
     );
 
     proto_shift #(
-        .WIDTH(8)
+        .WIDTH (`PROTO_SHIFT_W)
     ) u_shift (
         .clk             (clk),
         .rst_n           (rst_n),
@@ -184,8 +176,8 @@ module protocol_top #(
     );
 
     proto_fifo #(
-        .WIDTH(8),
-        .DEPTH(FIFO_DEPTH)
+        .WIDTH (`PROTO_DATA_W),
+        .DEPTH (FIFO_DEPTH)
     ) u_tx_fifo (
         .clk       (clk),
         .rst_n     (rst_n),
@@ -198,8 +190,8 @@ module protocol_top #(
     );
 
     proto_fifo #(
-        .WIDTH(8),
-        .DEPTH(FIFO_DEPTH)
+        .WIDTH (`PROTO_DATA_W),
+        .DEPTH (FIFO_DEPTH)
     ) u_rx_fifo (
         .clk       (clk),
         .rst_n     (rst_n),
@@ -212,7 +204,7 @@ module protocol_top #(
     );
 
     protocol_core #(
-        .IMEM_AW(IMEM_AW)
+        .IMEM_AW (IMEM_AW)
     ) u_core (
         .clk                 (clk),
         .rst_n               (rst_n),
@@ -249,10 +241,8 @@ module protocol_top #(
         .osr_load            (osr_load),
         .osr_load_data       (osr_load_data),
         .osr_shift           (osr_shift),
-        .osr_shift_right     (),
         .isr_clear           (isr_clear),
         .isr_shift           (isr_shift),
-        .isr_shift_right     (),
         .shift_serial_in     (shift_serial_in),
         .tx_empty            (tx_empty),
         .tx_pop_data         (tx_pop_data),
