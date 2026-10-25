@@ -6,13 +6,13 @@
 
 `define PROTO_INSTR_W      16
 `define PROTO_DATA_W       8
-`define PROTO_GPIO_W       8
-`define PROTO_SHIFT_W      8
-`define PROTO_TICK_W       16
+`define PROTO_GPIO_W       8 //GPIO count
+`define PROTO_SHIFT_W      8 //number of shift regs
+`define PROTO_TICK_W       16 //clock divider width
 `define PROTO_IMEM_AW      8
-`define PROTO_IMEM_DEPTH   256
+`define PROTO_IMEM_DEPTH   256 //a 256x16 IMEM
 `define PROTO_FIFO_DEPTH   4
-`define PROTO_CFG_AW       3
-`define PROTO_CFG_COUNT    8
+`define PROTO_CFG_AW       3 //Configuration address
+`define PROTO_CFG_COUNT    8 //8x8 bits
 
 `endif

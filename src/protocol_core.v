@@ -129,23 +129,57 @@ module protocol_core #(
         .opcode_known (opcode_known)
     );
 
-    function eval_cond;
-        input [2:0] c;
-        input [2:0] pin_index;
-        begin
-            case (c)
-                `COND_ZERO:     eval_cond = zero_flag;
-                `COND_NZERO:    eval_cond = ~zero_flag;
-                `COND_PIN_LOW:  eval_cond = ~gpio_in[pin_index];
-                `COND_PIN_HIGH: eval_cond =  gpio_in[pin_index];
-                `COND_PIN_RISE: eval_cond =  gpio_rise[pin_index];
-                `COND_PIN_FALL: eval_cond =  gpio_fall[pin_index];
-                `COND_TX_EMPTY: eval_cond =  tx_empty;
-                `COND_RX_FULL:  eval_cond =  rx_full;
-                default:        eval_cond = 1'b0;
-            endcase
-        end
-    endfunction
+    always @(*) begin
+        jcc_true     = 1'b0;
+        waitpin_true = 1'b0;
+
+        case (cond)
+            `COND_ZERO: begin
+                jcc_true     = zero_flag;
+                waitpin_true = zero_flag;
+            end
+
+            `COND_NZERO: begin
+                jcc_true     = ~zero_flag;
+                waitpin_true = ~zero_flag;
+            end
+
+            `COND_PIN_LOW: begin
+                jcc_true     = ~gpio_in[cfg_jmp_pin];
+                waitpin_true = ~gpio_in[waitpin_pin];
+            end
+
+            `COND_PIN_HIGH: begin
+                jcc_true     = gpio_in[cfg_jmp_pin];
+                waitpin_true = gpio_in[waitpin_pin];
+            end
+
+            `COND_PIN_RISE: begin
+                jcc_true     = gpio_rise[cfg_jmp_pin];
+                waitpin_true = gpio_rise[waitpin_pin];
+            end
+
+            `COND_PIN_FALL: begin
+                jcc_true     = gpio_fall[cfg_jmp_pin];
+                waitpin_true = gpio_fall[waitpin_pin];
+            end
+
+            `COND_TX_EMPTY: begin
+                jcc_true     = tx_empty;
+                waitpin_true = tx_empty;
+            end
+
+            `COND_RX_FULL: begin
+                jcc_true     = rx_full;
+                waitpin_true = rx_full;
+            end
+
+            default: begin
+                jcc_true     = 1'b0;
+                waitpin_true = 1'b0;
+            end
+        endcase
+    end
 
     always @(*) begin
         case (reg_src)
@@ -172,9 +206,6 @@ module protocol_core #(
             post_delay = {1'b0, aux3[1:0]};
         else
             post_delay = aux3;
-
-        jcc_true     = eval_cond(cond, cfg_jmp_pin);
-        waitpin_true = eval_cond(cond, waitpin_pin);
     end
 
     assign busy      = (state != ST_IDLE);

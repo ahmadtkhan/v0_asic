@@ -1,13 +1,12 @@
 `default_nettype none
 `include "proto_params.vh"
 
-// Instruction-memory abstraction.
+// 256x16 instruction-memory abstraction.
 //
-// Default simulation/synthesis path: behavioral synchronous 1RW memory.
-// For the IHP hard macro, define PROTO_USE_IHP_SRAM and include the selected
-// SRAM Verilog model in the build.  The hard-macro branch below is specifically
-// for RM_IHPSG13_1P_256x16_c2_bm_bist and therefore requires the V0 256x16
-// architecture values from proto_params.vh.
+// Physical TinyTapeout/LibreLane builds define PROTO_USE_IHP_SRAM and bind
+// u_imem_sram to RM_IHPSG13_1P_256x16_c2_bm_bist through src/config.json.
+// RTL simulation may either use the behavioral fallback below or compile the
+// official IHP functional SRAM model with PROTO_USE_IHP_SRAM + FUNCTIONAL.
 module instruction_memory #(
     parameter integer AW    = `PROTO_IMEM_AW,
     parameter integer DEPTH = `PROTO_IMEM_DEPTH
@@ -28,8 +27,8 @@ module instruction_memory #(
     wire core_read_accept;
     assign core_read_accept = core_req & ~prog_we;
 
-    // rvalid is deliberately registered.  This matches the core's conservative
-    // FETCH_REQ -> FETCH_WAIT sequencing and the synchronous SRAM contract.
+    // Both implementations below are synchronous 1RW memories.  The core's
+    // FETCH_REQ -> FETCH_WAIT sequence expects this one-cycle response pulse.
     always @(posedge clk) begin
         if (!rst_n)
             core_rvalid <= 1'b0;
@@ -39,17 +38,27 @@ module instruction_memory #(
 
 `ifdef PROTO_USE_IHP_SRAM
 
-    wire [`PROTO_INSTR_W-1:0] sram_dout;
-    wire [AW-1:0] mem_addr;
+    // V0 hard-SRAM mode is intentionally exact: 256 words x 16 bits.
+`ifndef SYNTHESIS
+    initial begin
+        if (AW != 8 || DEPTH != 256 || `PROTO_INSTR_W != 16) begin
+            $error("IHP IMEM macro requires AW=8, DEPTH=256, INSTR_W=16");
+        end
+    end
+`endif
 
-    assign mem_addr   = prog_we ? prog_addr : core_addr;
+    wire [15:0] sram_dout;
+    wire [7:0]  mem_addr;
+
+    // Programming has priority over instruction fetch.  protocol_top already
+    // exposes prog_ready only while the core is idle, so normal operation does
+    // not request a write and fetch in the same cycle.
+    assign mem_addr   = prog_we ? prog_addr[7:0] : core_addr[7:0];
     assign core_rdata = sram_dout;
 
-    // Current IHP SRAM functional interface follows the A_* convention used by
-    // Tiny Tapeout's IHP SRAM example.  BIST is disabled for normal operation.
     RM_IHPSG13_1P_256x16_c2_bm_bist u_imem_sram (
         .A_CLK       (clk),
-        .A_MEN       (prog_we | core_req),
+        .A_MEN       (prog_we | core_read_accept),
         .A_WEN       (prog_we),
         .A_REN       (core_read_accept),
         .A_ADDR      (mem_addr),
@@ -57,6 +66,7 @@ module instruction_memory #(
         .A_DLY       (1'b1),
         .A_DOUT      (sram_dout),
         .A_BM        (16'hFFFF),
+
         .A_BIST_CLK  (1'b0),
         .A_BIST_EN   (1'b0),
         .A_BIST_MEN  (1'b0),

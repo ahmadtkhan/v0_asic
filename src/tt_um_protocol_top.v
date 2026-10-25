@@ -82,7 +82,7 @@ module tt_um_protocol_top (
     assign host_cmd    = ui_in[6:4];
     assign show_rx_data = ui_in[3];
     assign host_arg    = ui_in[2:0];
-    assign host_pulse  = host_strobe & ~host_strobe_d;
+    assign host_pulse  = host_strobe & ~host_strobe_d; //detects rising edge
 
     // During idle/loading the bidirectional pins are released so an external
     // host may drive command data.  During execution they become protocol GPIO.
@@ -123,21 +123,24 @@ module tt_um_protocol_top (
 
             if (ena && host_pulse) begin
                 case (host_cmd)
-                    CMD_PROG_LO: begin
+                    CMD_PROG_LO: begin //store the lower 8-bit of future 16-bit instruction
+                        //nothing is written to IMEM in this stage
                         if (prog_ready)
                             prog_low_byte <= uio_in;
                     end
 
                     CMD_PROG_HI: begin
-                        if (prog_ready) begin
-                            prog_addr_commit <= prog_addr_ptr;
+                        if (prog_ready) begin //second half of loading one instruction
+                            //get 2 byte instruction by reading a byte in each cycle
+                            prog_addr_commit <= prog_addr_ptr; //prog_addr_ptr is the next instr addr
+                            //using two regs we store prog_addr and prog_instr separately CPU style
                             prog_wdata_r     <= {uio_in, prog_low_byte};
                             prog_we_r        <= 1'b1;
-                            prog_addr_ptr    <= prog_addr_ptr + 1'b1;
+                            prog_addr_ptr    <= prog_addr_ptr + 1'b1; //like PC moving to the next instr addr
                         end
                     end
 
-                    CMD_CFG: begin
+                    CMD_CFG: begin //writing one 8-bit config reg
                         if (cfg_ready) begin
                             cfg_addr_r  <= host_arg;
                             cfg_wdata_r <= uio_in;
@@ -145,26 +148,26 @@ module tt_um_protocol_top (
                         end
                     end
 
-                    CMD_TX_PUSH: begin
-                        if (!tx_full) begin
+                    CMD_TX_PUSH: begin //pushing host byte into TX FIFO
+                        if (!tx_full) begin //overflow check
                             tx_data_r <= uio_in;
                             tx_push_r <= 1'b1;
                         end
                     end
 
-                    CMD_RX_POP: begin
+                    CMD_RX_POP: begin //removes byte from FIFO and captures it to uo_out via rx_latched
                         if (!rx_empty) begin
                             rx_latched <= rx_data;
                             rx_pop_r   <= 1'b1;
                         end
                     end
 
-                    CMD_START: begin
+                    CMD_START: begin //tells protocol_top to start executing at instr addr 0
                         if (prog_ready)
                             start_r <= 1'b1;
                     end
 
-                    CMD_ADDR_RST: begin
+                    CMD_ADDR_RST: begin //next instr addr is 0. does not erase instruction memory
                         if (prog_ready)
                             prog_addr_ptr <= {`PROTO_IMEM_AW{1'b0}};
                     end
