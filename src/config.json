@@ -1,6 +1,6 @@
 {
   "//": "Tiny Tapeout IHP CMOS5L configuration with hard 256x16 instruction SRAM and 256x8 data SRAM.",
-  "PL_TARGET_DENSITY_PCT": 60,
+  "PL_TARGET_DENSITY_PCT": 20,
   "CLOCK_PERIOD": 20,
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
   "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
@@ -53,7 +53,7 @@
         "u_protocol_top.u_dmem.u_dmem_sram": {
           "location": [
             12,
-            170
+            300
           ],
           "orientation": "FS"
         }
