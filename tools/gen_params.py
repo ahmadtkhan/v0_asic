@@ -3,10 +3,9 @@
 
 The YAML used here is intentionally flat (key: integer), so this generator has
 no external Python dependency.  That keeps architecture changes reproducible
-without making the Tiny Tapeout synthesis flow depend on PyYAML.
+without making Tiny Tapeout synthesis depend on PyYAML.
 """
 from pathlib import Path
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCH = ROOT / "config" / "arch.yaml"
@@ -32,14 +31,15 @@ def parse_flat_yaml(path: Path):
 cfg = parse_flat_yaml(ARCH)
 required = [
     "instr_width", "data_width", "gpio_width", "shift_width", "tick_width",
-    "imem_addr_width", "imem_depth", "fifo_depth", "cfg_addr_width", "cfg_count",
+    "imem_addr_width", "imem_depth",
+    "dmem_addr_width", "dmem_depth",
+    "fifo_depth", "cfg_addr_width", "cfg_count",
 ]
 missing = [k for k in required if k not in cfg]
 if missing:
     raise SystemExit("Missing architecture keys: " + ", ".join(missing))
 
-# V0 ISA assumptions.  If one of these changes, the RTL/ISA itself must change,
-# not merely the build parameters.
+# V0 ISA assumptions.
 if cfg["instr_width"] != 16:
     raise SystemExit("V0 ISA requires instr_width: 16")
 if cfg["data_width"] != 8:
@@ -52,6 +52,8 @@ if cfg["cfg_addr_width"] != 3 or cfg["cfg_count"] != 8:
     raise SystemExit("V0 CFG encoding requires 3-bit address / 8 config bytes")
 if cfg["imem_depth"] != (1 << cfg["imem_addr_width"]):
     raise SystemExit("imem_depth must equal 2**imem_addr_width in V0")
+if cfg["dmem_addr_width"] != 8 or cfg["dmem_depth"] != 256:
+    raise SystemExit("V0 LOAD/STORE encoding requires 8-bit / 256-byte DMEM")
 if cfg["fifo_depth"] < 2:
     raise SystemExit("fifo_depth must be >= 2")
 
@@ -63,6 +65,8 @@ names = [
     ("PROTO_TICK_W", "tick_width"),
     ("PROTO_IMEM_AW", "imem_addr_width"),
     ("PROTO_IMEM_DEPTH", "imem_depth"),
+    ("PROTO_DMEM_AW", "dmem_addr_width"),
+    ("PROTO_DMEM_DEPTH", "dmem_depth"),
     ("PROTO_FIFO_DEPTH", "fifo_depth"),
     ("PROTO_CFG_AW", "cfg_addr_width"),
     ("PROTO_CFG_COUNT", "cfg_count"),
