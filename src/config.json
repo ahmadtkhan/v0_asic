@@ -1,24 +1,26 @@
 {
-  "//": "Tiny Tapeout IHP CMOS5L configuration with one 256x16 IHP instruction SRAM.",
-
+  "//": "Tiny Tapeout IHP CMOS5L configuration with hard 256x16 instruction SRAM and 256x8 data SRAM.",
   "PL_TARGET_DENSITY_PCT": 60,
   "CLOCK_PERIOD": 20,
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
   "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.05,
-
   "RUN_LINTER": 1,
   "LINTER_INCLUDE_PDK_MODELS": 1,
   "CLOCK_PORT": "clk",
-
-  "// SRAM define": "Select the hard-macro branch in instruction_memory.v for lint and synthesis.",
-  "VERILOG_DEFINES": ["PROTO_USE_IHP_SRAM"],
-
+  "// SRAM define": "Select hard-macro branches in instruction_memory.v and data_memory.v for lint and synthesis.",
+  "VERILOG_DEFINES": [
+    "PROTO_USE_IHP_SRAM",
+    "PROTO_USE_IHP_DMEM_SRAM"
+  ],
   "// SRAM macro": "Paths are relative to this file in src/. Instance path assumes tt_um_protocol_top -> u_protocol_top -> u_imem -> u_imem_sram after flattening.",
   "MACROS": {
     "RM_IHPSG13_1P_256x16_c2_bm_bist": {
       "instances": {
         "u_protocol_top.u_imem.u_imem_sram": {
-          "location": [12, 40],
+          "location": [
+            12,
+            40
+          ],
           "orientation": "FS"
         }
       },
@@ -45,40 +47,72 @@
       "spice": [
         "dir::../macro/RM_IHPSG13_1P_256x16_c2_bm_bist/RM_IHPSG13_1P_256x16_c2_bm_bist.cdl"
       ]
+    },
+    "RM_IHPSG13_1P_256x8_c3_bm_bist": {
+      "instances": {
+        "u_protocol_top.u_dmem.u_dmem_sram": {
+          "location": [
+            12,
+            170
+          ],
+          "orientation": "FS"
+        }
+      },
+      "gds": [
+        "dir::../macro/RM_IHPSG13_1P_256x8_c3_bm_bist/RM_IHPSG13_1P_256x8_c3_bm_bist.gds"
+      ],
+      "lef": [
+        "dir::../macro/RM_IHPSG13_1P_256x8_c3_bm_bist/RM_IHPSG13_1P_256x8_c3_bm_bist.lef"
+      ],
+      "lib": {
+        "*_typ_*": [
+          "dir::../macro/RM_IHPSG13_1P_256x8_c3_bm_bist/RM_IHPSG13_1P_256x8_c3_bm_bist_typ_1p20V_25C.lib"
+        ],
+        "*_fast_*": [
+          "dir::../macro/RM_IHPSG13_1P_256x8_c3_bm_bist/RM_IHPSG13_1P_256x8_c3_bm_bist_fast_1p32V_m55C.lib"
+        ],
+        "*_slow_*": [
+          "dir::../macro/RM_IHPSG13_1P_256x8_c3_bm_bist/RM_IHPSG13_1P_256x8_c3_bm_bist_slow_1p08V_125C.lib"
+        ]
+      },
+      "nl": [
+        "dir::./RM_IHPSG13_1P_256x8_c3_bm_bist.v"
+      ],
+      "spice": [
+        "dir::../macro/RM_IHPSG13_1P_256x8_c3_bm_bist/RM_IHPSG13_1P_256x8_c3_bm_bist.cdl"
+      ]
     }
   },
-
   "// SRAM power": "IHP macro has separate VDD! and VDDARRAY! pins; both are tied to Tiny Tapeout VPWR, with VSS! to VGND.",
   "PDN_MACRO_CONNECTIONS": [
     "u_protocol_top.u_imem.u_imem_sram VPWR VGND VDD! VSS!",
-    "u_protocol_top.u_imem.u_imem_sram VPWR VGND VDDARRAY! VSS!"
+    "u_protocol_top.u_imem.u_imem_sram VPWR VGND VDDARRAY! VSS!",
+    "u_protocol_top.u_dmem.u_dmem_sram VPWR VGND VDD! VSS!",
+    "u_protocol_top.u_dmem.u_dmem_sram VPWR VGND VDDARRAY! VSS!"
   ],
   "PDN_CFG": "dir::pdn_cfg.tcl",
   "MAGIC_MACRO_STD_CELL_SOURCE": "PDK",
   "ERROR_ON_MAGIC_DRC": false,
   "ERROR_ON_ILLEGAL_OVERLAPS": false,
-  "MAGIC_EXT_ABSTRACT_CELLS": ["RM_IHPSG13_.*"],
-
+  "MAGIC_EXT_ABSTRACT_CELLS": [
+    "RM_IHPSG13_.*"
+  ],
   "RUN_KLAYOUT_XOR": 0,
   "RUN_KLAYOUT_DRC": 0,
   "DESIGN_REPAIR_BUFFER_OUTPUT_PORTS": 0,
-
   "TOP_MARGIN_MULT": 1,
   "BOTTOM_MARGIN_MULT": 1,
   "LEFT_MARGIN_MULT": 6,
   "RIGHT_MARGIN_MULT": 6,
-
   "FP_SIZING": "absolute",
   "GRT_ALLOW_CONGESTION": 1,
   "FP_IO_HLENGTH": 2,
   "FP_IO_VLENGTH": 2,
-
   "// SRAM-aligned PDN": "Same x-column geometry as the successfully hardened IHP 512x16 macro recipe; 256x16 has the same 236.8um width/power-column x positions.",
   "FP_PDN_VPITCH": 67.44,
   "FP_PDN_VWIDTH": 2.1,
   "FP_PDN_VSPACING": 3.52,
   "FP_PDN_VOFFSET": 26.36,
-
   "RUN_CTS": 1,
   "FP_PDN_MULTILAYER": 0,
   "MAGIC_DEF_LABELS": 0,

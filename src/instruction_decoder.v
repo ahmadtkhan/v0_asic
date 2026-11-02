@@ -22,6 +22,20 @@ module instruction_decoder (
     output wire [2:0]  cfg_addr,
     output wire [7:0]  cfg_data,
 
+    // LOAD/STORE:
+    // [10:9] data register, [8] base register, [7:0] signed offset.
+    output wire [1:0]  mem_reg,
+    output wire        mem_base,
+    output wire [7:0]  mem_offset,
+
+    // ALU:
+    // [10:7] operation, [6:5] destination, [4:3] source A,
+    // [2:1] source B, [0] reserved.
+    output wire [3:0]  alu_op,
+    output wire [1:0]  alu_dst,
+    output wire [1:0]  alu_src_a,
+    output wire [1:0]  alu_src_b,
+
     output reg          opcode_known
 );
 
@@ -46,6 +60,17 @@ module instruction_decoder (
     // CFG: [10:8] byte address, [7:0] data.
     assign cfg_addr = instr[10:8];
     assign cfg_data = instr[7:0];
+
+    // LOAD/STORE common memory format.
+    assign mem_reg    = instr[10:9];
+    assign mem_base   = instr[8];
+    assign mem_offset = instr[7:0];
+
+    // ALU common format.
+    assign alu_op    = instr[10:7];
+    assign alu_dst   = instr[6:5];
+    assign alu_src_a = instr[4:3];
+    assign alu_src_b = instr[2:1];
 
     always @(*) begin
         case (opcode)

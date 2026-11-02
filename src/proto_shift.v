@@ -13,6 +13,8 @@ module proto_shift #(
     input  wire             osr_shift,
     input  wire             osr_shift_right,
 
+    input  wire             isr_load,
+    input  wire [WIDTH-1:0] isr_load_data,
     input  wire             isr_clear,
     input  wire             isr_shift,
     input  wire             isr_shift_right,
@@ -39,7 +41,11 @@ module proto_shift #(
                     osr <= {osr[WIDTH-2:0], 1'b0};
             end
 
-            if (isr_clear) begin
+            // Explicit LOAD-to-ISR has highest priority.  Existing IN behavior
+            // remains unchanged when isr_load is low.
+            if (isr_load) begin
+                isr <= isr_load_data;
+            end else if (isr_clear) begin
                 isr <= {WIDTH{1'b0}};
             end else if (isr_shift) begin
                 if (isr_shift_right)

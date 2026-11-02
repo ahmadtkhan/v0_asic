@@ -2,12 +2,17 @@
 `include "proto_params.vh"
 `include "proto_isa.vh"
 
-// V0 protocol execution core.  It intentionally uses a conservative
-// request/wait/execute fetch sequence so the first implementation has simple,
-// deterministic synchronous-SRAM behavior.  A later prefetch optimization can
-// remove fetch bubbles without changing this ISA.
+// V0 protocol execution core.
+//
+// Instruction fetch remains conservative and synchronous:
+// FETCH_REQ -> FETCH_WAIT -> EXEC.
+//
+// LOAD/STORE use a separate 256-byte Harvard data-memory port.  STORE commits
+// on the EXEC clock edge.  LOAD enters ST_DMEM_WAIT and completes when the
+// synchronous data memory raises dmem_rvalid.
 module protocol_core #(
-    parameter integer IMEM_AW = `PROTO_IMEM_AW
+    parameter integer IMEM_AW = `PROTO_IMEM_AW,
+    parameter integer DMEM_AW = `PROTO_DMEM_AW
 ) (
     input  wire                         clk,
     input  wire                         rst_n,
@@ -20,6 +25,13 @@ module protocol_core #(
     output wire [IMEM_AW-1:0]           imem_addr,
     input  wire [`PROTO_INSTR_W-1:0]    imem_rdata,
     input  wire                         imem_rvalid,
+
+    output reg                          dmem_req,
+    output reg                          dmem_we,
+    output reg  [DMEM_AW-1:0]           dmem_addr,
+    output reg  [`PROTO_DATA_W-1:0]     dmem_wdata,
+    input  wire [`PROTO_DATA_W-1:0]     dmem_rdata,
+    input  wire                         dmem_rvalid,
 
     input  wire                         tick,
 
@@ -47,10 +59,13 @@ module protocol_core #(
     output reg  [`PROTO_GPIO_W-1:0]     gpio_oe_wdata,
 
     input  wire                         shift_serial_out,
+    input  wire [`PROTO_SHIFT_W-1:0]    shift_osr,
     input  wire [`PROTO_SHIFT_W-1:0]    shift_isr,
     output reg                          osr_load,
     output reg  [`PROTO_SHIFT_W-1:0]    osr_load_data,
     output reg                          osr_shift,
+    output reg                          isr_load,
+    output reg  [`PROTO_SHIFT_W-1:0]    isr_load_data,
     output reg                          isr_clear,
     output reg                          isr_shift,
     output reg                          shift_serial_in,
@@ -64,6 +79,7 @@ module protocol_core #(
     output reg  [`PROTO_DATA_W-1:0]     rx_push_data
 );
 
+    // All eight encodings fit in the existing 3-bit state field.
     localparam [2:0] ST_IDLE       = 3'd0;
     localparam [2:0] ST_FETCH_REQ  = 3'd1;
     localparam [2:0] ST_FETCH_WAIT = 3'd2;
@@ -71,6 +87,7 @@ module protocol_core #(
     localparam [2:0] ST_WAIT_TICKS = 3'd4;
     localparam [2:0] ST_WAIT_PIN   = 3'd5;
     localparam [2:0] ST_POST_DELAY = 3'd6;
+    localparam [2:0] ST_DMEM_WAIT  = 3'd7;
 
     reg [2:0] state;
     reg [IMEM_AW-1:0] pc;
@@ -80,6 +97,11 @@ module protocol_core #(
     reg [`PROTO_DATA_W-1:0] y_reg;
     reg [`PROTO_DATA_W-1:0] loop_count;
     reg                     zero_flag;
+
+    // LOAD destination is latched when the request is issued.  This makes the
+    // memory transaction independent of IR remaining stable in future fetch
+    // optimizations.
+    reg [1:0] load_dst;
 
     // WAIT uses the full 11-bit payload.  Side-set/post-delay uses three bits.
     reg [10:0] wait_remaining;
@@ -97,6 +119,13 @@ module protocol_core #(
     wire [7:0]  imm8;
     wire [2:0]  dec_cfg_addr;
     wire [7:0]  dec_cfg_data;
+    wire [1:0]  mem_reg;
+    wire        mem_base;
+    wire [7:0]  mem_offset;
+    wire [3:0]  alu_op;
+    wire [1:0]  alu_dst;
+    wire [1:0]  alu_src_a;
+    wire [1:0]  alu_src_b;
     wire        opcode_known;
 
     reg                     side_capable;
@@ -105,6 +134,16 @@ module protocol_core #(
     reg                     jcc_true;
     reg                     waitpin_true;
     reg [`PROTO_DATA_W-1:0] selected_src;
+
+    reg [`PROTO_DATA_W-1:0] mem_base_value;
+    reg [`PROTO_DATA_W-1:0] mem_store_value;
+    reg [`PROTO_DATA_W-1:0] mem_effective_addr;
+
+    reg  [`PROTO_DATA_W-1:0] alu_a_value;
+    reg  [`PROTO_DATA_W-1:0] alu_b_value;
+    wire [`PROTO_DATA_W-1:0] alu_result;
+    wire                     alu_zero;
+    wire                     alu_write_result;
 
     // Combinational datapath temporaries.
     reg [`PROTO_GPIO_W-1:0] next_out;
@@ -126,9 +165,18 @@ module protocol_core #(
         .imm8         (imm8),
         .cfg_addr     (dec_cfg_addr),
         .cfg_data     (dec_cfg_data),
+        .mem_reg      (mem_reg),
+        .mem_base     (mem_base),
+        .mem_offset   (mem_offset),
+        .alu_op       (alu_op),
+        .alu_dst      (alu_dst),
+        .alu_src_a    (alu_src_a),
+        .alu_src_b    (alu_src_b),
         .opcode_known (opcode_known)
     );
 
+    // Condition evaluation is explicit so Verilog always @(*) sensitivity
+    // includes the runtime GPIO/flag dependencies.
     always @(*) begin
         jcc_true     = 1'b0;
         waitpin_true = 1'b0;
@@ -181,6 +229,7 @@ module protocol_core #(
         endcase
     end
 
+    // MOV source selector remains the original X/Y/LC register bank.
     always @(*) begin
         case (reg_src)
             `REG_X:   selected_src = x_reg;
@@ -189,6 +238,58 @@ module protocol_core #(
             default:  selected_src = {`PROTO_DATA_W{1'b0}};
         endcase
     end
+
+    // DMEM address and STORE source selection.
+    //
+    // mem_offset is encoded as signed two's-complement, but because both the
+    // base register and DMEM address are 8 bits, ordinary 8-bit addition gives
+    // the desired modulo-256 result for both positive and negative offsets.
+    always @(*) begin
+        case (mem_base)
+            `MEM_BASE_Y: mem_base_value = y_reg;
+            default:     mem_base_value = x_reg;
+        endcase
+
+        mem_effective_addr = mem_base_value + mem_offset;
+
+        case (mem_reg)
+            `MEM_REG_X:   mem_store_value = x_reg;
+            `MEM_REG_Y:   mem_store_value = y_reg;
+            `MEM_REG_OSR: mem_store_value = shift_osr;
+            `MEM_REG_ISR: mem_store_value = shift_isr;
+            default:      mem_store_value = {`PROTO_DATA_W{1'b0}};
+        endcase
+    end
+
+
+    // ALU source operands come from the same byte registers used by DMEM:
+    // X, Y, OSR and ISR.
+    always @(*) begin
+        case (alu_src_a)
+            `ALU_REG_X:   alu_a_value = x_reg;
+            `ALU_REG_Y:   alu_a_value = y_reg;
+            `ALU_REG_OSR: alu_a_value = shift_osr;
+            `ALU_REG_ISR: alu_a_value = shift_isr;
+            default:      alu_a_value = {`PROTO_DATA_W{1'b0}};
+        endcase
+
+        case (alu_src_b)
+            `ALU_REG_X:   alu_b_value = x_reg;
+            `ALU_REG_Y:   alu_b_value = y_reg;
+            `ALU_REG_OSR: alu_b_value = shift_osr;
+            `ALU_REG_ISR: alu_b_value = shift_isr;
+            default:      alu_b_value = {`PROTO_DATA_W{1'b0}};
+        endcase
+    end
+
+    proto_alu u_alu (
+        .op           (alu_op),
+        .a            (alu_a_value),
+        .b            (alu_b_value),
+        .result       (alu_result),
+        .zero         (alu_zero),
+        .write_result (alu_write_result)
+    );
 
     always @(*) begin
         side_capable = 1'b0;
@@ -212,11 +313,17 @@ module protocol_core #(
     assign imem_req  = (state == ST_FETCH_REQ);
     assign imem_addr = pc;
 
-    // One-cycle control pulses and GPIO next-state calculation.
+    // One-cycle control pulses, memory request generation, and GPIO next-state
+    // calculation.
     always @(*) begin
         cfg_we          = 1'b0;
         cfg_addr        = dec_cfg_addr;
         cfg_wdata       = dec_cfg_data;
+
+        dmem_req        = 1'b0;
+        dmem_we         = 1'b0;
+        dmem_addr       = mem_effective_addr[DMEM_AW-1:0];
+        dmem_wdata      = mem_store_value;
 
         gpio_out_we     = 1'b0;
         gpio_out_wdata  = gpio_out;
@@ -226,6 +333,8 @@ module protocol_core #(
         osr_load        = 1'b0;
         osr_load_data   = tx_pop_data;
         osr_shift       = 1'b0;
+        isr_load        = 1'b0;
+        isr_load_data   = dmem_rdata;
         isr_clear       = 1'b0;
         isr_shift       = 1'b0;
         shift_serial_in = gpio_in[cfg_in_pin];
@@ -298,6 +407,41 @@ module protocol_core #(
                     cfg_wdata = dec_cfg_data;
                 end
 
+                `OP_LOAD: begin
+                    dmem_req   = 1'b1;
+                    dmem_we    = 1'b0;
+                    dmem_addr  = mem_effective_addr[DMEM_AW-1:0];
+                end
+
+                `OP_STORE: begin
+                    dmem_req   = 1'b1;
+                    dmem_we    = 1'b1;
+                    dmem_addr  = mem_effective_addr[DMEM_AW-1:0];
+                    dmem_wdata = mem_store_value;
+                end
+
+                `OP_ALU: begin
+                    // X/Y destinations are written in the sequential block.
+                    // OSR/ISR are external to the core, so generate the same
+                    // one-cycle load pulses used by PULL/DMEM LOAD.
+                    if (alu_write_result) begin
+                        case (alu_dst)
+                            `ALU_REG_OSR: begin
+                                osr_load      = 1'b1;
+                                osr_load_data = alu_result;
+                            end
+
+                            `ALU_REG_ISR: begin
+                                isr_load      = 1'b1;
+                                isr_load_data = alu_result;
+                            end
+
+                            default: begin
+                            end
+                        endcase
+                    end
+                end
+
                 default: begin
                 end
             endcase
@@ -315,6 +459,25 @@ module protocol_core #(
             end
         end
 
+        // LOAD to OSR/ISR completes when synchronous DMEM data is valid.
+        // X/Y destinations are written in the sequential state machine below.
+        if ((state == ST_DMEM_WAIT) && dmem_rvalid) begin
+            case (load_dst)
+                `MEM_REG_OSR: begin
+                    osr_load      = 1'b1;
+                    osr_load_data = dmem_rdata;
+                end
+
+                `MEM_REG_ISR: begin
+                    isr_load      = 1'b1;
+                    isr_load_data = dmem_rdata;
+                end
+
+                default: begin
+                end
+            endcase
+        end
+
         gpio_out_we    = out_changed;
         gpio_out_wdata = next_out;
         gpio_oe_we     = oe_changed;
@@ -330,6 +493,7 @@ module protocol_core #(
             y_reg           <= {`PROTO_DATA_W{1'b0}};
             loop_count      <= {`PROTO_DATA_W{1'b0}};
             zero_flag       <= 1'b1;
+            load_dst        <= `MEM_REG_X;
             wait_remaining  <= 11'h000;
             delay_remaining <= 3'b000;
             fault           <= 1'b0;
@@ -447,10 +611,39 @@ module protocol_core #(
                                 state     <= ST_FETCH_REQ;
                             end
 
+                            `OP_LOAD: begin
+                                load_dst <= mem_reg;
+                                state    <= ST_DMEM_WAIT;
+                            end
+
+                            `OP_STORE: begin
+                                // The synchronous SRAM accepts the write on
+                                // this EXEC clock edge; no response is needed.
+                                pc    <= pc + 1'b1;
+                                state <= ST_FETCH_REQ;
+                            end
+
+                            `OP_ALU: begin
+                                if (alu_write_result) begin
+                                    case (alu_dst)
+                                        `ALU_REG_X: x_reg <= alu_result;
+                                        `ALU_REG_Y: y_reg <= alu_result;
+                                        // OSR/ISR are updated by combinational
+                                        // load pulses on this same clock edge.
+                                        `ALU_REG_OSR: begin end
+                                        `ALU_REG_ISR: begin end
+                                        default: begin end
+                                    endcase
+                                end
+
+                                zero_flag <= alu_zero;
+                                pc        <= pc + 1'b1;
+                                state     <= ST_FETCH_REQ;
+                            end
+
                             // Reserved known encodings fault until their hardware
                             // semantics are implemented.
-                            `OP_ALU, `OP_EVENT, `OP_CRC, `OP_STREAM,
-                            `OP_LOAD, `OP_STORE: begin
+                            `OP_EVENT, `OP_CRC, `OP_STREAM: begin
                                 fault <= 1'b1;
                                 state <= ST_IDLE;
                             end
@@ -497,6 +690,24 @@ module protocol_core #(
                         end else begin
                             delay_remaining <= delay_remaining - 1'b1;
                         end
+                    end
+                end
+
+                ST_DMEM_WAIT: begin
+                    if (dmem_rvalid) begin
+                        case (load_dst)
+                            `MEM_REG_X: x_reg <= dmem_rdata;
+                            `MEM_REG_Y: y_reg <= dmem_rdata;
+                            // OSR/ISR are loaded by combinational pulses into
+                            // proto_shift on this same clock edge.
+                            `MEM_REG_OSR: begin end
+                            `MEM_REG_ISR: begin end
+                            default: begin end
+                        endcase
+
+                        zero_flag <= (dmem_rdata == {`PROTO_DATA_W{1'b0}});
+                        pc        <= pc + 1'b1;
+                        state     <= ST_FETCH_REQ;
                     end
                 end
 

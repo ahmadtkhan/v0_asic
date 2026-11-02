@@ -6,6 +6,8 @@
 module protocol_top #(
     parameter integer IMEM_AW    = `PROTO_IMEM_AW,
     parameter integer IMEM_DEPTH = `PROTO_IMEM_DEPTH,
+    parameter integer DMEM_AW    = `PROTO_DMEM_AW,
+    parameter integer DMEM_DEPTH = `PROTO_DMEM_DEPTH,
     parameter integer FIFO_DEPTH = `PROTO_FIFO_DEPTH
 ) (
     input  wire                         clk,
@@ -44,6 +46,13 @@ module protocol_top #(
     wire [`PROTO_INSTR_W-1:0]    imem_rdata;
     wire                         imem_rvalid;
 
+    wire                         dmem_req;
+    wire                         dmem_we;
+    wire [DMEM_AW-1:0]           dmem_addr;
+    wire [`PROTO_DATA_W-1:0]     dmem_wdata;
+    wire [`PROTO_DATA_W-1:0]     dmem_rdata;
+    wire                         dmem_rvalid;
+
     wire                         core_cfg_we;
     wire [`PROTO_CFG_AW-1:0]     core_cfg_addr;
     wire [`PROTO_DATA_W-1:0]     core_cfg_wdata;
@@ -73,6 +82,8 @@ module protocol_top #(
     wire                         osr_load;
     wire [`PROTO_SHIFT_W-1:0]    osr_load_data;
     wire                         osr_shift;
+    wire                         isr_load;
+    wire [`PROTO_SHIFT_W-1:0]    isr_load_data;
     wire                         isr_clear;
     wire                         isr_shift;
     wire                         shift_serial_in;
@@ -104,6 +115,20 @@ module protocol_top #(
         .core_addr   (imem_addr),
         .core_rdata  (imem_rdata),
         .core_rvalid (imem_rvalid)
+    );
+
+    data_memory #(
+        .AW    (DMEM_AW),
+        .DEPTH (DMEM_DEPTH)
+    ) u_dmem (
+        .clk    (clk),
+        .rst_n  (rst_n),
+        .req    (dmem_req),
+        .we     (dmem_we),
+        .addr   (dmem_addr),
+        .wdata  (dmem_wdata),
+        .rdata  (dmem_rdata),
+        .rvalid (dmem_rvalid)
     );
 
     config_regs u_cfg (
@@ -166,6 +191,8 @@ module protocol_top #(
         .osr_load_data   (osr_load_data),
         .osr_shift       (osr_shift),
         .osr_shift_right (out_shift_right),
+        .isr_load        (isr_load),
+        .isr_load_data   (isr_load_data),
         .isr_clear       (isr_clear),
         .isr_shift       (isr_shift),
         .isr_shift_right (in_shift_right),
@@ -204,17 +231,27 @@ module protocol_top #(
     );
 
     protocol_core #(
-        .IMEM_AW (IMEM_AW)
+        .IMEM_AW (IMEM_AW),
+        .DMEM_AW (DMEM_AW)
     ) u_core (
         .clk                 (clk),
         .rst_n               (rst_n),
         .start               (start),
         .busy                (busy),
         .fault               (fault),
+
         .imem_req            (imem_req),
         .imem_addr           (imem_addr),
         .imem_rdata          (imem_rdata),
         .imem_rvalid         (imem_rvalid),
+
+        .dmem_req            (dmem_req),
+        .dmem_we             (dmem_we),
+        .dmem_addr           (dmem_addr),
+        .dmem_wdata          (dmem_wdata),
+        .dmem_rdata          (dmem_rdata),
+        .dmem_rvalid         (dmem_rvalid),
+
         .tick                (tick),
         .cfg_out_pin         (out_pin),
         .cfg_in_pin          (in_pin),
@@ -237,10 +274,13 @@ module protocol_top #(
         .gpio_oe_we          (gpio_oe_we),
         .gpio_oe_wdata       (gpio_oe_wdata),
         .shift_serial_out    (shift_serial_out),
+        .shift_osr           (osr_value),
         .shift_isr           (isr_value),
         .osr_load            (osr_load),
         .osr_load_data       (osr_load_data),
         .osr_shift           (osr_shift),
+        .isr_load            (isr_load),
+        .isr_load_data       (isr_load_data),
         .isr_clear           (isr_clear),
         .isr_shift           (isr_shift),
         .shift_serial_in     (shift_serial_in),
