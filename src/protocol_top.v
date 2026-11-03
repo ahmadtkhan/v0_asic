@@ -256,8 +256,6 @@ module protocol_top #(
         .cfg_out_pin         (out_pin),
         .cfg_in_pin          (in_pin),
         .cfg_side_pin        (side_pin),
-        .cfg_out_shift_right (out_shift_right),
-        .cfg_in_shift_right  (in_shift_right),
         .cfg_side_enable     (side_enable),
         .cfg_side_target_oe  (side_target_oe),
         .cfg_jmp_pin         (jmp_pin),

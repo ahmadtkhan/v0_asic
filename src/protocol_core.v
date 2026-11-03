@@ -2,7 +2,7 @@
 `include "proto_params.vh"
 `include "proto_isa.vh"
 
-// V0 protocol execution core.
+// V1 protocol execution core.
 //
 // Instruction fetch remains conservative and synchronous:
 // FETCH_REQ -> FETCH_WAIT -> EXEC.
@@ -38,8 +38,6 @@ module protocol_core #(
     input  wire [2:0]                   cfg_out_pin,
     input  wire [2:0]                   cfg_in_pin,
     input  wire [2:0]                   cfg_side_pin,
-    input  wire                         cfg_out_shift_right,
-    input  wire                         cfg_in_shift_right,
     input  wire                         cfg_side_enable,
     input  wire                         cfg_side_target_oe,
     input  wire [2:0]                   cfg_jmp_pin,
@@ -79,17 +77,20 @@ module protocol_core #(
     output reg  [`PROTO_DATA_W-1:0]     rx_push_data
 );
 
-    // All eight encodings fit in the existing 3-bit state field.
-    localparam [2:0] ST_IDLE       = 3'd0;
-    localparam [2:0] ST_FETCH_REQ  = 3'd1;
-    localparam [2:0] ST_FETCH_WAIT = 3'd2;
-    localparam [2:0] ST_EXEC       = 3'd3;
-    localparam [2:0] ST_WAIT_TICKS = 3'd4;
-    localparam [2:0] ST_WAIT_PIN   = 3'd5;
-    localparam [2:0] ST_POST_DELAY = 3'd6;
-    localparam [2:0] ST_DMEM_WAIT  = 3'd7;
+    // V1 adds blocking accelerator-wait states, so the internal FSM expands to 4 bits.
+    // Existing state numbers 0..7 are intentionally preserved for waveform continuity.
+    localparam [3:0] ST_IDLE        = 4'd0;
+    localparam [3:0] ST_FETCH_REQ   = 4'd1;
+    localparam [3:0] ST_FETCH_WAIT  = 4'd2;
+    localparam [3:0] ST_EXEC        = 4'd3;
+    localparam [3:0] ST_WAIT_TICKS  = 4'd4;
+    localparam [3:0] ST_WAIT_PIN    = 4'd5;
+    localparam [3:0] ST_POST_DELAY  = 4'd6;
+    localparam [3:0] ST_DMEM_WAIT   = 4'd7;
+    localparam [3:0] ST_CRC_WAIT    = 4'd8;
+    localparam [3:0] ST_STREAM_WAIT = 4'd9;
 
-    reg [2:0] state;
+    reg [3:0] state;
     reg [IMEM_AW-1:0] pc;
     reg [`PROTO_INSTR_W-1:0] ir;
 
@@ -110,6 +111,7 @@ module protocol_core #(
     wire [4:0]  opcode;
     wire [10:0] payload11;
     wire [2:0]  aux3;
+    wire [2:0]  subop3;
     wire [7:0]  arg8;
     wire [2:0]  cond;
     wire [7:0]  branch_addr;
@@ -127,6 +129,7 @@ module protocol_core #(
     wire [1:0]  alu_src_a;
     wire [1:0]  alu_src_b;
     wire        opcode_known;
+    wire        instr_legal;
 
     reg                     side_capable;
     reg                     side_value;
@@ -145,6 +148,49 @@ module protocol_core #(
     wire                     alu_zero;
     wire                     alu_write_result;
 
+    // ---------------------------------------------------------------------
+    // CRC/LFSR accelerator controls and datapath
+    // ---------------------------------------------------------------------
+    reg                      crc_ctrl_we;
+    reg                      crc_poly_we;
+    reg                      crc_init_we;
+    reg                      crc_xor_we;
+    reg [1:0]                crc_byte_sel;
+    reg [`PROTO_DATA_W-1:0]  crc_cfg_data;
+    reg                      crc_state_reset;
+    reg                      crc_feed_byte_start;
+    reg [`PROTO_DATA_W-1:0]  crc_feed_byte_data;
+    reg                      crc_feed_bit_valid;
+    reg                      crc_feed_bit;
+    reg [`PROTO_DATA_W-1:0]  crc_src_value;
+    reg [`PROTO_DATA_W-1:0]  crc_read_byte;
+    wire                     crc_done;
+    wire [31:0]              crc_result_value;
+
+    // ---------------------------------------------------------------------
+    // DMEM-backed stream accelerator
+    // ---------------------------------------------------------------------
+    reg                      stream_cfg_we;
+    reg [`PROTO_DATA_W-1:0]  stream_cfg_data;
+    reg                      stream_stuff_cfg_we;
+    reg [`PROTO_DATA_W-1:0]  stream_stuff_cfg_data;
+    reg                      stream_clear;
+    reg                      stream_start_tx;
+    reg                      stream_start_rx;
+    wire                     stream_done;
+    wire [`PROTO_DATA_W-1:0] stream_status;
+    wire                     stream_line_we;
+    wire                     stream_line_bit;
+    wire                     stream_dmem_req;
+    wire                     stream_dmem_we;
+    wire [DMEM_AW-1:0]       stream_dmem_addr;
+    wire [`PROTO_DATA_W-1:0] stream_dmem_wdata;
+    wire                     stream_crc_bit_valid;
+    wire                     stream_crc_bit;
+
+    wire                     crc_bit_mux_valid;
+    wire                     crc_bit_mux;
+
     // Combinational datapath temporaries.
     reg [`PROTO_GPIO_W-1:0] next_out;
     reg [`PROTO_GPIO_W-1:0] next_oe;
@@ -156,6 +202,7 @@ module protocol_core #(
         .opcode       (opcode),
         .payload11    (payload11),
         .aux3         (aux3),
+        .subop3       (subop3),
         .arg8         (arg8),
         .cond         (cond),
         .branch_addr  (branch_addr),
@@ -172,7 +219,8 @@ module protocol_core #(
         .alu_dst      (alu_dst),
         .alu_src_a    (alu_src_a),
         .alu_src_b    (alu_src_b),
-        .opcode_known (opcode_known)
+        .opcode_known (opcode_known),
+        .instr_legal  (instr_legal)
     );
 
     // Condition evaluation is explicit so Verilog always @(*) sensitivity
@@ -291,6 +339,81 @@ module protocol_core #(
         .write_result (alu_write_result)
     );
 
+    // New accelerator instructions use the same canonical REG8 selector as
+    // ALU and LOAD/STORE so bytes move without dedicated copy paths.
+    always @(*) begin
+        case (arg8[7:6])
+            `REG8_X:   crc_src_value = x_reg;
+            `REG8_Y:   crc_src_value = y_reg;
+            `REG8_OSR: crc_src_value = shift_osr;
+            `REG8_ISR: crc_src_value = shift_isr;
+            default:   crc_src_value = {`PROTO_DATA_W{1'b0}};
+        endcase
+
+        case (arg8[5:4])
+            2'd0: crc_read_byte = crc_result_value[7:0];
+            2'd1: crc_read_byte = crc_result_value[15:8];
+            2'd2: crc_read_byte = crc_result_value[23:16];
+            2'd3: crc_read_byte = crc_result_value[31:24];
+        endcase
+    end
+
+    assign crc_bit_mux_valid = crc_feed_bit_valid | stream_crc_bit_valid;
+    assign crc_bit_mux       = stream_crc_bit_valid ? stream_crc_bit : crc_feed_bit;
+
+    proto_crc_lfsr u_crc_lfsr (
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .ctrl_we         (crc_ctrl_we),
+        .ctrl_data       (arg8),
+        .poly_we         (crc_poly_we),
+        .init_we         (crc_init_we),
+        .xor_we          (crc_xor_we),
+        .byte_sel        (crc_byte_sel),
+        .cfg_data        (crc_cfg_data),
+        .state_reset     (crc_state_reset),
+        .feed_byte_start (crc_feed_byte_start),
+        .feed_byte_data  (crc_feed_byte_data),
+        .feed_bit_valid  (crc_bit_mux_valid),
+        .feed_bit        (crc_bit_mux),
+        .busy            (),
+        .done            (crc_done),
+        .state_value     (),
+        .result_value    (crc_result_value)
+    );
+
+    proto_stream #(
+        .AW (DMEM_AW)
+    ) u_stream (
+        .clk            (clk),
+        .rst_n          (rst_n),
+        .tick           (tick),
+        .cfg_we         (stream_cfg_we),
+        .cfg_data       (stream_cfg_data),
+        .stuff_cfg_we   (stream_stuff_cfg_we),
+        .stuff_cfg_data (stream_stuff_cfg_data),
+        .clear_status   (stream_clear),
+        .start_tx       (stream_start_tx),
+        .start_rx       (stream_start_rx),
+        .base_addr      (x_reg[DMEM_AW-1:0]),
+        .bit_count_m1   (arg8),
+        .gpio_in_bit    (gpio_in[cfg_in_pin]),
+        .line_we        (stream_line_we),
+        .line_bit       (stream_line_bit),
+        .dmem_req       (stream_dmem_req),
+        .dmem_we        (stream_dmem_we),
+        .dmem_addr      (stream_dmem_addr),
+        .dmem_wdata     (stream_dmem_wdata),
+        .dmem_rdata     (dmem_rdata),
+        .dmem_rvalid    (dmem_rvalid),
+        .busy           (),
+        .done           (stream_done),
+        .error          (),
+        .status         (stream_status),
+        .crc_bit_valid  (stream_crc_bit_valid),
+        .crc_bit        (stream_crc_bit)
+    );
+
     always @(*) begin
         side_capable = 1'b0;
         case (opcode)
@@ -319,6 +442,26 @@ module protocol_core #(
         cfg_we          = 1'b0;
         cfg_addr        = dec_cfg_addr;
         cfg_wdata       = dec_cfg_data;
+
+        crc_ctrl_we         = 1'b0;
+        crc_poly_we         = 1'b0;
+        crc_init_we         = 1'b0;
+        crc_xor_we          = 1'b0;
+        crc_byte_sel        = arg8[5:4];
+        crc_cfg_data        = crc_src_value;
+        crc_state_reset     = 1'b0;
+        crc_feed_byte_start = 1'b0;
+        crc_feed_byte_data  = crc_src_value;
+        crc_feed_bit_valid  = 1'b0;
+        crc_feed_bit        = crc_src_value[arg8[5:3]];
+
+        stream_cfg_we         = 1'b0;
+        stream_cfg_data       = arg8;
+        stream_stuff_cfg_we   = 1'b0;
+        stream_stuff_cfg_data = arg8;
+        stream_clear          = 1'b0;
+        stream_start_tx       = 1'b0;
+        stream_start_rx       = 1'b0;
 
         dmem_req        = 1'b0;
         dmem_we         = 1'b0;
@@ -442,6 +585,91 @@ module protocol_core #(
                     end
                 end
 
+                `OP_CRC: begin
+                    case (subop3)
+                        `CRC_CFG: begin
+                            crc_ctrl_we = 1'b1;
+                        end
+                        `CRC_POLY: begin
+                            crc_poly_we  = 1'b1;
+                            crc_cfg_data = crc_src_value;
+                        end
+                        `CRC_INIT: begin
+                            crc_init_we  = 1'b1;
+                            crc_cfg_data = crc_src_value;
+                        end
+                        `CRC_XOR: begin
+                            crc_xor_we   = 1'b1;
+                            crc_cfg_data = crc_src_value;
+                        end
+                        `CRC_RESET: begin
+                            crc_state_reset = 1'b1;
+                        end
+                        `CRC_FEED8: begin
+                            crc_feed_byte_start = 1'b1;
+                            crc_feed_byte_data  = crc_src_value;
+                        end
+                        `CRC_FEED1: begin
+                            crc_feed_bit_valid = 1'b1;
+                            crc_feed_bit       = crc_src_value[arg8[5:3]];
+                        end
+                        `CRC_READ: begin
+                            case (arg8[7:6])
+                                `REG8_OSR: begin
+                                    osr_load      = 1'b1;
+                                    osr_load_data = crc_read_byte;
+                                end
+                                `REG8_ISR: begin
+                                    isr_load      = 1'b1;
+                                    isr_load_data = crc_read_byte;
+                                end
+                                default: begin
+                                end
+                            endcase
+                        end
+                        default: begin
+                        end
+                    endcase
+                end
+
+                `OP_STREAM: begin
+                    case (subop3)
+                        `STREAM_CFG: begin
+                            stream_cfg_we   = 1'b1;
+                            stream_cfg_data = arg8;
+                        end
+                        `STREAM_STUFF_CFG: begin
+                            stream_stuff_cfg_we   = 1'b1;
+                            stream_stuff_cfg_data = arg8;
+                        end
+                        `STREAM_TX: begin
+                            stream_start_tx = 1'b1;
+                        end
+                        `STREAM_RX: begin
+                            stream_start_rx = 1'b1;
+                        end
+                        `STREAM_STATUS: begin
+                            case (arg8[7:6])
+                                `REG8_OSR: begin
+                                    osr_load      = 1'b1;
+                                    osr_load_data = stream_status;
+                                end
+                                `REG8_ISR: begin
+                                    isr_load      = 1'b1;
+                                    isr_load_data = stream_status;
+                                end
+                                default: begin
+                                end
+                            endcase
+                        end
+                        `STREAM_CLEAR: begin
+                            stream_clear = 1'b1;
+                        end
+                        default: begin
+                        end
+                    endcase
+                end
+
                 default: begin
                 end
             endcase
@@ -456,6 +684,20 @@ module protocol_core #(
                     next_out[cfg_side_pin] = side_value;
                     out_changed            = 1'b1;
                 end
+            end
+        end
+
+        // While a blocking STREAM command is active, the stream engine owns the
+        // single-port DMEM and may update the configured output pin on each tick.
+        if (state == ST_STREAM_WAIT) begin
+            dmem_req   = stream_dmem_req;
+            dmem_we    = stream_dmem_we;
+            dmem_addr  = stream_dmem_addr;
+            dmem_wdata = stream_dmem_wdata;
+
+            if (stream_line_we) begin
+                next_out[cfg_out_pin] = stream_line_bit;
+                out_changed           = 1'b1;
             end
         end
 
@@ -519,7 +761,7 @@ module protocol_core #(
                 end
 
                 ST_EXEC: begin
-                    if (!opcode_known) begin
+                    if (!opcode_known || !instr_legal) begin
                         fault <= 1'b1;
                         state <= ST_IDLE;
                     end else begin
@@ -641,9 +883,66 @@ module protocol_core #(
                                 state     <= ST_FETCH_REQ;
                             end
 
-                            // Reserved known encodings fault until their hardware
-                            // semantics are implemented.
-                            `OP_EVENT, `OP_CRC, `OP_STREAM: begin
+                            `OP_CRC: begin
+                                case (subop3)
+                                    `CRC_FEED8: begin
+                                        // Byte feeder is sequential and asserts crc_done
+                                        // after all eight configured-order bits.
+                                        state <= ST_CRC_WAIT;
+                                    end
+
+                                    `CRC_READ: begin
+                                        case (arg8[7:6])
+                                            `REG8_X: x_reg <= crc_read_byte;
+                                            `REG8_Y: y_reg <= crc_read_byte;
+                                            `REG8_OSR: begin end
+                                            `REG8_ISR: begin end
+                                            default: begin end
+                                        endcase
+                                        zero_flag <= (crc_read_byte == 8'h00);
+                                        pc        <= pc + 1'b1;
+                                        state     <= ST_FETCH_REQ;
+                                    end
+
+                                    default: begin
+                                        // CFG/POLY/INIT/XOR/RESET/FEED1 complete
+                                        // through one-cycle combinational control pulses.
+                                        pc    <= pc + 1'b1;
+                                        state <= ST_FETCH_REQ;
+                                    end
+                                endcase
+                            end
+
+                            `OP_STREAM: begin
+                                case (subop3)
+                                    `STREAM_TX, `STREAM_RX: begin
+                                        state <= ST_STREAM_WAIT;
+                                    end
+
+                                    `STREAM_STATUS: begin
+                                        case (arg8[7:6])
+                                            `REG8_X: x_reg <= stream_status;
+                                            `REG8_Y: y_reg <= stream_status;
+                                            `REG8_OSR: begin end
+                                            `REG8_ISR: begin end
+                                            default: begin end
+                                        endcase
+                                        zero_flag <= (stream_status == 8'h00);
+                                        pc        <= pc + 1'b1;
+                                        state     <= ST_FETCH_REQ;
+                                    end
+
+                                    default: begin
+                                        // CFG/STUFF_CFG/CLEAR complete in one cycle.
+                                        pc    <= pc + 1'b1;
+                                        state <= ST_FETCH_REQ;
+                                    end
+                                endcase
+                            end
+
+                            // EVENT remains architecturally assigned but is not
+                            // implemented in V1.
+                            `OP_EVENT: begin
                                 fault <= 1'b1;
                                 state <= ST_IDLE;
                             end
@@ -708,6 +1007,23 @@ module protocol_core #(
                         zero_flag <= (dmem_rdata == {`PROTO_DATA_W{1'b0}});
                         pc        <= pc + 1'b1;
                         state     <= ST_FETCH_REQ;
+                    end
+                end
+
+                ST_CRC_WAIT: begin
+                    if (crc_done) begin
+                        pc    <= pc + 1'b1;
+                        state <= ST_FETCH_REQ;
+                    end
+                end
+
+                ST_STREAM_WAIT: begin
+                    if (stream_done) begin
+                        // Stream protocol errors are reported through
+                        // STREAM_STATUS rather than turning malformed external
+                        // traffic into a core/ISA fault.
+                        pc    <= pc + 1'b1;
+                        state <= ST_FETCH_REQ;
                     end
                 end
 
