@@ -191,6 +191,34 @@ module protocol_core #(
     wire                     crc_bit_mux_valid;
     wire                     crc_bit_mux;
 
+    // ---------------------------------------------------------------------
+    // CAN nominal bit timing / synchronization
+    // ---------------------------------------------------------------------
+    reg                      can_brp_we;
+    reg [`PROTO_DATA_W-1:0]  can_brp_data;
+    reg                      can_seg1_we;
+    reg [`PROTO_DATA_W-1:0]  can_seg1_data;
+    reg                      can_seg2_we;
+    reg [`PROTO_DATA_W-1:0]  can_seg2_data;
+    reg                      can_ctrl_we;
+    reg [`PROTO_DATA_W-1:0]  can_ctrl_data;
+    reg                      can_arb_we;
+    reg [`PROTO_DATA_W-1:0]  can_arb_data;
+    reg                      can_clear;
+
+    wire                     can_enable;
+    wire                     can_cfg_valid;
+    wire                     can_bit_tick;
+    wire                     can_sample_strobe;
+    wire                     can_sampled_bit;
+    wire                     can_arbitration_lost_now;
+    wire [`PROTO_DATA_W-1:0] can_status;
+    wire [`PROTO_DATA_W-1:0] can_phase_error;
+
+    wire                     stream_can_tx_start;
+    wire                     stream_can_rx_start;
+    wire                     stream_can_stop;
+
     // Combinational datapath temporaries.
     reg [`PROTO_GPIO_W-1:0] next_out;
     reg [`PROTO_GPIO_W-1:0] next_oe;
@@ -382,12 +410,50 @@ module protocol_core #(
         .result_value    (crc_result_value)
     );
 
+    proto_can_timing u_can_timing (
+        .clk                  (clk),
+        .rst_n                (rst_n),
+        .brp_we               (can_brp_we),
+        .brp_data             (can_brp_data),
+        .seg1_we              (can_seg1_we),
+        .seg1_data            (can_seg1_data),
+        .seg2_we              (can_seg2_we),
+        .seg2_data            (can_seg2_data),
+        .ctrl_we              (can_ctrl_we),
+        .ctrl_data            (can_ctrl_data),
+        .arb_we               (can_arb_we),
+        .arb_bits_m1_data     (can_arb_data),
+        .clear_status         (can_clear),
+        .tx_start             (stream_can_tx_start),
+        .rx_start             (stream_can_rx_start),
+        .stream_stop          (stream_can_stop),
+        .bus_level            (gpio_in[cfg_in_pin]),
+        .bus_fall             (gpio_fall[cfg_in_pin]),
+        .tx_level             (gpio_out[cfg_out_pin]),
+        .can_enable           (can_enable),
+        .cfg_valid            (can_cfg_valid),
+        .bit_tick             (can_bit_tick),
+        .sample_strobe        (can_sample_strobe),
+        .sampled_bit          (can_sampled_bit),
+        .arbitration_lost_now (can_arbitration_lost_now),
+        .status               (can_status),
+        .last_phase_error     (can_phase_error)
+    );
+
     proto_stream #(
         .AW (DMEM_AW)
     ) u_stream (
         .clk            (clk),
         .rst_n          (rst_n),
         .tick           (tick),
+        .can_mode       (can_enable),
+        .can_cfg_valid  (can_cfg_valid),
+        .can_bit_tick   (can_bit_tick),
+        .can_sampled_bit(can_sampled_bit),
+        .can_abort_tx   (can_arbitration_lost_now),
+        .can_tx_start   (stream_can_tx_start),
+        .can_rx_start   (stream_can_rx_start),
+        .can_stop       (stream_can_stop),
         .cfg_we         (stream_cfg_we),
         .cfg_data       (stream_cfg_data),
         .stuff_cfg_we   (stream_stuff_cfg_we),
@@ -462,6 +528,18 @@ module protocol_core #(
         stream_clear          = 1'b0;
         stream_start_tx       = 1'b0;
         stream_start_rx       = 1'b0;
+
+        can_brp_we      = 1'b0;
+        can_brp_data    = arg8;
+        can_seg1_we     = 1'b0;
+        can_seg1_data   = arg8;
+        can_seg2_we     = 1'b0;
+        can_seg2_data   = arg8;
+        can_ctrl_we     = 1'b0;
+        can_ctrl_data   = arg8;
+        can_arb_we      = 1'b0;
+        can_arb_data    = arg8;
+        can_clear       = 1'b0;
 
         dmem_req        = 1'b0;
         dmem_we         = 1'b0;
@@ -670,6 +748,64 @@ module protocol_core #(
                     endcase
                 end
 
+                `OP_CAN: begin
+                    case (subop3)
+                        `CAN_BRP: begin
+                            can_brp_we   = 1'b1;
+                            can_brp_data = arg8;
+                        end
+                        `CAN_SEG1: begin
+                            can_seg1_we   = 1'b1;
+                            can_seg1_data = arg8;
+                        end
+                        `CAN_SEG2: begin
+                            can_seg2_we   = 1'b1;
+                            can_seg2_data = arg8;
+                        end
+                        `CAN_CTRL: begin
+                            can_ctrl_we   = 1'b1;
+                            can_ctrl_data = arg8;
+                        end
+                        `CAN_ARB: begin
+                            can_arb_we   = 1'b1;
+                            can_arb_data = arg8;
+                        end
+                        `CAN_STATUS: begin
+                            case (arg8[7:6])
+                                `REG8_OSR: begin
+                                    osr_load      = 1'b1;
+                                    osr_load_data = can_status;
+                                end
+                                `REG8_ISR: begin
+                                    isr_load      = 1'b1;
+                                    isr_load_data = can_status;
+                                end
+                                default: begin
+                                end
+                            endcase
+                        end
+                        `CAN_PHASE: begin
+                            case (arg8[7:6])
+                                `REG8_OSR: begin
+                                    osr_load      = 1'b1;
+                                    osr_load_data = can_phase_error;
+                                end
+                                `REG8_ISR: begin
+                                    isr_load      = 1'b1;
+                                    isr_load_data = can_phase_error;
+                                end
+                                default: begin
+                                end
+                            endcase
+                        end
+                        `CAN_CLEAR: begin
+                            can_clear = 1'b1;
+                        end
+                        default: begin
+                        end
+                    endcase
+                end
+
                 default: begin
                 end
             endcase
@@ -697,6 +833,12 @@ module protocol_core #(
 
             if (stream_line_we) begin
                 next_out[cfg_out_pin] = stream_line_bit;
+                out_changed           = 1'b1;
+            end
+
+            if (can_arbitration_lost_now) begin
+                // Recessive=1 releases an open-drain CAN output.
+                next_out[cfg_out_pin] = 1'b1;
                 out_changed           = 1'b1;
             end
         end
@@ -938,6 +1080,34 @@ module protocol_core #(
                                         state <= ST_FETCH_REQ;
                                     end
                                 endcase
+                            end
+
+                            `OP_CAN: begin
+                                case (subop3)
+                                    `CAN_STATUS: begin
+                                        case (arg8[7:6])
+                                            `REG8_X: x_reg <= can_status;
+                                            `REG8_Y: y_reg <= can_status;
+                                            default: begin end
+                                        endcase
+                                        zero_flag <= (can_status == 8'h00);
+                                    end
+
+                                    `CAN_PHASE: begin
+                                        case (arg8[7:6])
+                                            `REG8_X: x_reg <= can_phase_error;
+                                            `REG8_Y: y_reg <= can_phase_error;
+                                            default: begin end
+                                        endcase
+                                        zero_flag <= (can_phase_error == 8'h00);
+                                    end
+
+                                    default: begin
+                                    end
+                                endcase
+
+                                pc    <= pc + 1'b1;
+                                state <= ST_FETCH_REQ;
                             end
 
                             // EVENT remains architecturally assigned but is not

@@ -29,6 +29,16 @@ module proto_stream #(
     input  wire                    rst_n,
     input  wire                    tick,
 
+    // CAN timing override.
+    input  wire                    can_mode,
+    input  wire                    can_cfg_valid,
+    input  wire                    can_bit_tick,
+    input  wire                    can_sampled_bit,
+    input  wire                    can_abort_tx,
+    output reg                     can_tx_start,
+    output reg                     can_rx_start,
+    output reg                     can_stop,
+
     input  wire                    cfg_we,
     input  wire [7:0]              cfg_data,
     input  wire                    stuff_cfg_we,
@@ -66,6 +76,7 @@ module proto_stream #(
     localparam [2:0] S_TX_ACTIVE    = 3'd3;
     localparam [2:0] S_TX_NEXT_WAIT = 3'd4;
     localparam [2:0] S_RX_ACTIVE    = 3'd5;
+    localparam [2:0] S_TX_DRAIN     = 3'd6;
 
     reg [2:0] state;
 
@@ -89,6 +100,11 @@ module proto_stream #(
     assign cfg_manchester_enable= stream_cfg[5];
     assign cfg_manchester_invert= stream_cfg[6];
     assign cfg_crc_auto         = stream_cfg[7];
+
+    wire stream_tick;
+    wire sampled_input_bit;
+    assign stream_tick       = can_mode ? can_bit_tick    : tick;
+    assign sampled_input_bit = can_mode ? can_sampled_bit : gpio_in_bit;
 
     reg [AW-1:0] cur_addr;
     reg [8:0]    bits_remaining;
@@ -127,11 +143,11 @@ module proto_stream #(
     wire man_tx_second;
 
     wire rx_wire_step;
-    assign rx_wire_step = (state == S_RX_ACTIVE) && tick &&
+    assign rx_wire_step = (state == S_RX_ACTIVE) && stream_tick &&
                           (!cfg_manchester_enable || man_phase);
 
     wire rx_line_bit;
-    assign rx_line_bit = cfg_manchester_enable ? man_rx_data_bit : gpio_in_bit;
+    assign rx_line_bit = cfg_manchester_enable ? man_rx_data_bit : sampled_input_bit;
 
     // Stuffing and NRZI share one packet-scoped state because STREAM is either
     // TX or RX, never both simultaneously.
@@ -143,7 +159,7 @@ module proto_stream #(
     wire bs_error_now;
 
     wire tx_new_wire_bit_step;
-    assign tx_new_wire_bit_step = (state == S_TX_ACTIVE) && tick &&
+    assign tx_new_wire_bit_step = (state == S_TX_ACTIVE) && stream_tick &&
                                   (!cfg_manchester_enable || !man_phase);
 
     wire nrzi_step;
@@ -222,7 +238,7 @@ module proto_stream #(
     // A payload bit advances only when the stuffer consumed it.  An inserted
     // wire bit intentionally leaves bit_index unchanged.
     wire tx_payload_advance;
-    assign tx_payload_advance = (state == S_TX_ACTIVE) && tick &&
+    assign tx_payload_advance = (state == S_TX_ACTIVE) && stream_tick &&
         ((!cfg_manchester_enable && bs_consume) ||
          ( cfg_manchester_enable && man_phase && man_consume_hold));
 
@@ -270,7 +286,7 @@ module proto_stream #(
             dmem_addr = cur_addr + 1'b1;
         end
 
-        if ((state == S_TX_ACTIVE) && tick) begin
+        if ((state == S_TX_ACTIVE) && stream_tick) begin
             if (cfg_manchester_enable) begin
                 line_we = 1'b1;
                 if (!man_phase)
@@ -327,8 +343,14 @@ module proto_stream #(
             man_error_sticky    <= 1'b0;
             last_was_rx         <= 1'b0;
             done                <= 1'b0;
+            can_tx_start        <= 1'b0;
+            can_rx_start        <= 1'b0;
+            can_stop            <= 1'b0;
         end else begin
-            done <= 1'b0;
+            done         <= 1'b0;
+            can_tx_start <= 1'b0;
+            can_rx_start <= 1'b0;
+            can_stop     <= 1'b0;
 
             if ((state == S_IDLE) && cfg_we)
                 stream_cfg <= cfg_data;
@@ -358,10 +380,21 @@ module proto_stream #(
                 man_error_sticky    <= 1'b0;
                 last_was_rx         <= start_rx;
 
-                if (start_tx)
+                // CAN supplies one timing event per CAN bit.  NRZI and
+                // Manchester require a different wire-rate clock and are
+                // intentionally rejected while CAN timing is selected.
+                if (can_mode && (!can_cfg_valid ||
+                    cfg_nrzi_enable || cfg_manchester_enable)) begin
+                    error_sticky <= 1'b1;
+                    done         <= 1'b1;
+                    state        <= S_IDLE;
+                end else if (start_tx) begin
                     state <= S_TX_REQ;
-                else
+                end else begin
                     state <= S_RX_ACTIVE;
+                    if (can_mode)
+                        can_rx_start <= 1'b1;
+                end
             end else begin
                 case (state)
                     S_IDLE: begin
@@ -377,10 +410,18 @@ module proto_stream #(
                             tx_cur_byte <= dmem_rdata;
                             bit_index   <= 3'd0;
                             state       <= S_TX_ACTIVE;
+                            if (can_mode)
+                                can_tx_start <= 1'b1;
                         end
                     end
 
                     S_TX_ACTIVE: begin
+                        if (can_mode && can_abort_tx) begin
+                            error_sticky <= 1'b1;
+                            state        <= S_IDLE;
+                            done         <= 1'b1;
+                            can_stop     <= 1'b1;
+                        end else begin
                         // Capture an outstanding prefetch response.
                         if (dmem_rvalid && tx_prefetch_pending) begin
                             tx_next_byte        <= dmem_rdata;
@@ -391,7 +432,7 @@ module proto_stream #(
                         if (need_prefetch)
                             tx_prefetch_pending <= 1'b1;
 
-                        if (tick && cfg_manchester_enable) begin
+                        if (stream_tick && cfg_manchester_enable) begin
                             if (!man_phase) begin
                                 man_second_hold  <= man_tx_second;
                                 man_consume_hold <= bs_consume;
@@ -404,8 +445,12 @@ module proto_stream #(
                         if (tx_payload_advance) begin
                             if (bits_remaining == 9'd1) begin
                                 bits_remaining <= 9'd0;
-                                state          <= S_IDLE;
-                                done           <= 1'b1;
+                                if (can_mode) begin
+                                    state <= S_TX_DRAIN;
+                                end else begin
+                                    state <= S_IDLE;
+                                    done  <= 1'b1;
+                                end
                             end else begin
                                 bits_remaining <= bits_remaining - 1'b1;
                                 if (tx_complete_byte) begin
@@ -430,6 +475,7 @@ module proto_stream #(
                                 end
                             end
                         end
+                        end
                     end
 
                     S_TX_NEXT_WAIT: begin
@@ -441,10 +487,23 @@ module proto_stream #(
                         end
                     end
 
+                    S_TX_DRAIN: begin
+                        if (can_abort_tx) begin
+                            error_sticky <= 1'b1;
+                            state        <= S_IDLE;
+                            done         <= 1'b1;
+                            can_stop     <= 1'b1;
+                        end else if (can_bit_tick) begin
+                            state    <= S_IDLE;
+                            done     <= 1'b1;
+                            can_stop <= 1'b1;
+                        end
+                    end
+
                     S_RX_ACTIVE: begin
-                        if (tick && cfg_manchester_enable) begin
+                        if (stream_tick && cfg_manchester_enable) begin
                             if (!man_phase) begin
-                                rx_first_hold <= gpio_in_bit;
+                                rx_first_hold <= sampled_input_bit;
                                 man_phase     <= 1'b1;
                             end else begin
                                 man_phase <= 1'b0;
@@ -469,6 +528,8 @@ module proto_stream #(
                                 bit_index      <= 3'd0;
                                 state          <= S_IDLE;
                                 done           <= 1'b1;
+                                if (can_mode)
+                                    can_stop <= 1'b1;
                             end else begin
                                 bits_remaining <= bits_remaining - 1'b1;
                                 if (bit_index == 3'd7) begin

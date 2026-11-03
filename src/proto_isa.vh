@@ -10,7 +10,8 @@
 //
 // Unused/reserved bits in V1 encodings must be zero.  instruction_decoder.v
 // exposes instr_legal so malformed encodings trap instead of being silently
-// accepted.  Opcodes 0x19..0x1F remain reserved for future architectural work.
+// accepted.  OP_CAN=0x19 is the CAN nominal-bit-timing extension; opcodes
+// 0x1A..0x1F remain reserved for future architectural work.
 
 // -----------------------------------------------------------------------------
 // Primary opcodes
@@ -40,7 +41,7 @@
 `define OP_STREAM      5'h16
 `define OP_LOAD        5'h17
 `define OP_STORE       5'h18
-`define OP_RSVD19      5'h19
+`define OP_CAN         5'h19
 `define OP_RSVD1A      5'h1A
 `define OP_RSVD1B      5'h1B
 `define OP_RSVD1C      5'h1C
@@ -199,6 +200,53 @@
 
 `define STREAM_RSVD6    3'd6
 `define STREAM_RSVD7    3'd7
+
+
+
+// -----------------------------------------------------------------------------
+// OP_CAN -- CAN 2.0 nominal bit timing / synchronization
+//   [10:8] sub-operation
+//   [7:0]  argument
+//
+// cfg_in_pin is CAN RX/bus monitor. cfg_out_pin is CAN TX logical state.
+// With open drain configured: 0=dominant, 1=recessive.
+// -----------------------------------------------------------------------------
+`define CAN_BRP          3'd0
+// arg = clocks-per-TQ minus one, 0=>1 ... 255=>256.
+
+`define CAN_SEG1         3'd1
+// arg[7:4]=PROP_SEG-1 (0..7), arg[3:0]=PHASE_SEG1-1 (0..7).
+
+`define CAN_SEG2         3'd2
+// arg[7:4]=PHASE_SEG2-2 (0..6), arg[3:0]=SJW-1 (0..3).
+
+`define CAN_CTRL         3'd3
+`define CAN_F_ENABLE          8'h01
+`define CAN_F_RESYNC_ENABLE   8'h02
+`define CAN_F_RX_HARD_SYNC    8'h04
+`define CAN_F_ARB_MONITOR     8'h08
+// arg[7:4]=0.
+
+`define CAN_ARB          3'd4
+// arg = arbitration wire-bit count minus one, 0=>1 ... 255=>256.
+
+`define CAN_STATUS       3'd5
+// arg[7:6]=REG8 destination; arg[5:0]=0.
+// [0] active
+// [1] synchronized
+// [2] config valid
+// [3] last sampled bus bit
+// [4] resync seen
+// [5] RX hard sync seen
+// [6] arbitration lost
+// [7] waiting for hard-sync edge
+
+`define CAN_PHASE        3'd6
+// arg[7:6]=REG8 destination; arg[5:0]=0.
+// signed last phase error in whole TQ.
+
+`define CAN_CLEAR        3'd7
+// arg=0; clears sticky timing/arbitration status.
 
 // -----------------------------------------------------------------------------
 // Byte-addressed configuration space used by OP_CFG

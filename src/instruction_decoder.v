@@ -164,6 +164,36 @@ module instruction_decoder (
                 endcase
             end
 
+            `OP_CAN: begin
+                case (subop3)
+                    `CAN_BRP: begin
+                    end
+
+                    `CAN_SEG1:
+                        instr_legal = (arg8[7] == 1'b0) &&
+                                      (arg8[3] == 1'b0);
+
+                    `CAN_SEG2:
+                        instr_legal = (arg8[7:4] <= 4'd6) &&
+                                      (arg8[3:0] <= 4'd3);
+
+                    `CAN_CTRL:
+                        instr_legal = (arg8[7:4] == 4'h0);
+
+                    `CAN_ARB: begin
+                    end
+
+                    `CAN_STATUS, `CAN_PHASE:
+                        instr_legal = (arg8[5:0] == 6'b000000);
+
+                    `CAN_CLEAR:
+                        instr_legal = (arg8 == 8'h00);
+
+                    default:
+                        instr_legal = 1'b0;
+                endcase
+            end
+
             `OP_LOAD, `OP_STORE: begin
             end
 
