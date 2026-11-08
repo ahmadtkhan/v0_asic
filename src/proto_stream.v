@@ -133,9 +133,6 @@ module proto_stream #(
     assign tx_payload_bit = cfg_lsb_first ? tx_cur_byte[bit_index]
                                           : tx_cur_byte[3'd7 - bit_index];
 
-    wire is_rx;
-    assign is_rx = (state == S_RX_ACTIVE);
-
     // Manchester RX produces one coded line bit after every pair of half-bits.
     wire man_rx_data_bit;
     wire man_rx_error;
@@ -149,63 +146,91 @@ module proto_stream #(
     wire rx_line_bit;
     assign rx_line_bit = cfg_manchester_enable ? man_rx_data_bit : sampled_input_bit;
 
-    // Stuffing and NRZI share one packet-scoped state because STREAM is either
-    // TX or RX, never both simultaneously.
-    wire bs_step;
-    wire bs_in_bit;
-    wire bs_out_valid;
-    wire bs_out_bit;
-    wire bs_consume;
-    wire bs_error_now;
-
     wire tx_new_wire_bit_step;
     assign tx_new_wire_bit_step = (state == S_TX_ACTIVE) && stream_tick &&
                                   (!cfg_manchester_enable || !man_phase);
 
-    wire nrzi_step;
-    wire nrzi_in_bit;
-    wire nrzi_out_bit;
+    // Keep the TX and RX codec directions structurally separate.  A single
+    // shared bit-stuffer/NRZI pair creates a combinational cycle because TX is
+    // payload -> stuff -> NRZI while RX is line -> NRZI -> destuff.  Separate
+    // instances remove that feedback path while preserving packet-scoped state.
+    wire tx_bs_out_bit;
+    wire tx_bs_consume;
 
-    assign nrzi_step   = tx_new_wire_bit_step | rx_wire_step;
-    assign nrzi_in_bit = is_rx ? rx_line_bit : bs_out_bit;
+    wire rx_bs_out_valid;
+    wire rx_bs_out_bit;
+    wire rx_bs_error_now;
 
-    assign bs_step   = tx_new_wire_bit_step | rx_wire_step;
-    assign bs_in_bit = is_rx ? (cfg_nrzi_enable ? nrzi_out_bit : rx_line_bit)
-                             : tx_payload_bit;
+    wire tx_nrzi_out_bit;
+    wire rx_nrzi_out_bit;
+    wire rx_destuff_in_bit;
 
-    proto_bitstuff u_bitstuff (
+    proto_bitstuff u_bitstuff_tx (
         .clk           (clk),
         .rst_n         (rst_n),
         .clear         (codec_clear),
         .enable        (cfg_stuff_enable),
-        .destuff       (is_rx),
+        .destuff       (1'b0),
         .mode_any      (cfg_stuff_any),
         .threshold     (stuff_threshold),
-        .step          (bs_step),
-        .in_bit        (bs_in_bit),
-        .out_valid     (bs_out_valid),
-        .out_bit       (bs_out_bit),
-        .consume_input (bs_consume),
+        .step          (tx_new_wire_bit_step),
+        .in_bit        (tx_payload_bit),
+        .out_valid     (),
+        .out_bit       (tx_bs_out_bit),
+        .consume_input (tx_bs_consume),
         .inserted      (),
         .dropped       (),
-        .error_now     (bs_error_now),
+        .error_now     (),
         .error         ()
     );
 
-    proto_nrzi u_nrzi (
+    proto_nrzi u_nrzi_tx (
         .clk           (clk),
         .rst_n         (rst_n),
         .clear         (codec_clear),
-        .decode        (is_rx),
+        .decode        (1'b0),
         .initial_level (cfg_nrzi_initial),
-        .step          (nrzi_step & cfg_nrzi_enable),
-        .in_bit        (nrzi_in_bit),
-        .out_bit       (nrzi_out_bit),
+        .step          (tx_new_wire_bit_step & cfg_nrzi_enable),
+        .in_bit        (tx_bs_out_bit),
+        .out_bit       (tx_nrzi_out_bit),
         .level_state   ()
     );
 
+    proto_nrzi u_nrzi_rx (
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .clear         (codec_clear),
+        .decode        (1'b1),
+        .initial_level (cfg_nrzi_initial),
+        .step          (rx_wire_step & cfg_nrzi_enable),
+        .in_bit        (rx_line_bit),
+        .out_bit       (rx_nrzi_out_bit),
+        .level_state   ()
+    );
+
+    assign rx_destuff_in_bit = cfg_nrzi_enable ? rx_nrzi_out_bit : rx_line_bit;
+
+    proto_bitstuff u_bitstuff_rx (
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .clear         (codec_clear),
+        .enable        (cfg_stuff_enable),
+        .destuff       (1'b1),
+        .mode_any      (cfg_stuff_any),
+        .threshold     (stuff_threshold),
+        .step          (rx_wire_step),
+        .in_bit        (rx_destuff_in_bit),
+        .out_valid     (rx_bs_out_valid),
+        .out_bit       (rx_bs_out_bit),
+        .consume_input (),
+        .inserted      (),
+        .dropped       (),
+        .error_now     (rx_bs_error_now),
+        .error         ()
+    );
+
     wire tx_line_coded_bit;
-    assign tx_line_coded_bit = cfg_nrzi_enable ? nrzi_out_bit : bs_out_bit;
+    assign tx_line_coded_bit = cfg_nrzi_enable ? tx_nrzi_out_bit : tx_bs_out_bit;
 
     proto_manchester u_manchester (
         .invert         (cfg_manchester_invert),
@@ -219,17 +244,17 @@ module proto_stream #(
     );
 
     wire rx_payload_event;
-    assign rx_payload_event = rx_wire_step && bs_out_valid &&
-                              !bs_error_now &&
+    assign rx_payload_event = rx_wire_step && rx_bs_out_valid &&
+                              !rx_bs_error_now &&
                               !(cfg_manchester_enable && man_rx_error);
 
     reg [7:0] rx_byte_with_bit;
     always @(*) begin
         rx_byte_with_bit = rx_byte;
         if (cfg_lsb_first)
-            rx_byte_with_bit[bit_index] = bs_out_bit;
+            rx_byte_with_bit[bit_index] = rx_bs_out_bit;
         else
-            rx_byte_with_bit[3'd7 - bit_index] = bs_out_bit;
+            rx_byte_with_bit[3'd7 - bit_index] = rx_bs_out_bit;
     end
 
     wire rx_complete_byte;
@@ -239,7 +264,7 @@ module proto_stream #(
     // wire bit intentionally leaves bit_index unchanged.
     wire tx_payload_advance;
     assign tx_payload_advance = (state == S_TX_ACTIVE) && stream_tick &&
-        ((!cfg_manchester_enable && bs_consume) ||
+        ((!cfg_manchester_enable && tx_bs_consume) ||
          ( cfg_manchester_enable && man_phase && man_consume_hold));
 
     wire tx_complete_byte;
@@ -298,7 +323,7 @@ module proto_stream #(
                 line_bit = tx_line_coded_bit;
             end
 
-            if (cfg_crc_auto && tx_new_wire_bit_step && bs_consume) begin
+            if (cfg_crc_auto && tx_new_wire_bit_step && tx_bs_consume) begin
                 crc_bit_valid = 1'b1;
                 crc_bit       = tx_payload_bit;
             end
@@ -316,7 +341,7 @@ module proto_stream #(
 
             if (cfg_crc_auto && rx_payload_event) begin
                 crc_bit_valid = 1'b1;
-                crc_bit       = bs_out_bit;
+                crc_bit       = rx_bs_out_bit;
             end
         end
     end
@@ -435,7 +460,7 @@ module proto_stream #(
                         if (stream_tick && cfg_manchester_enable) begin
                             if (!man_phase) begin
                                 man_second_hold  <= man_tx_second;
-                                man_consume_hold <= bs_consume;
+                                man_consume_hold <= tx_bs_consume;
                                 man_phase        <= 1'b1;
                             end else begin
                                 man_phase <= 1'b0;
@@ -516,7 +541,7 @@ module proto_stream #(
                             end
                         end
 
-                        if (rx_wire_step && bs_error_now) begin
+                        if (rx_wire_step && rx_bs_error_now) begin
                             error_sticky       <= 1'b1;
                             stuff_error_sticky <= 1'b1;
                             state              <= S_IDLE;
