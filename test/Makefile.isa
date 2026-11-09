@@ -1,0 +1,36 @@
+# Level-1 ISA regression.
+SIM ?= icarus
+TOPLEVEL_LANG ?= verilog
+TOPLEVEL := isa_tb
+MODULE := test_isa
+
+SRC_DIR := $(abspath ../src)
+REPO_ROOT := $(abspath ..)
+
+PROJECT_SOURCES := \
+    proto_gpio.v \
+    proto_shift.v \
+    proto_tick.v \
+    proto_fifo.v \
+    proto_bitstuff.v \
+    proto_nrzi.v \
+    proto_manchester.v \
+    proto_crc_lfsr.v \
+    proto_can_timing.v \
+    proto_stream.v \
+    proto_alu.v \
+    config_regs.v \
+    instruction_decoder.v \
+    instruction_memory.v \
+    data_memory.v \
+    protocol_core.v \
+    protocol_top.v
+
+VERILOG_SOURCES := $(addprefix $(SRC_DIR)/,$(PROJECT_SOURCES)) $(PWD)/isa_tb.v
+
+COMPILE_ARGS += -I$(SRC_DIR)
+COMPILE_ARGS += -DCOCOTB_SIM
+
+export PYTHONPATH := $(REPO_ROOT):$(PYTHONPATH)
+
+include $(shell cocotb-config --makefiles)/Makefile.sim

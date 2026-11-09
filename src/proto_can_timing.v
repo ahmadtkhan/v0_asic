@@ -90,6 +90,9 @@ module proto_can_timing (
 
     assign can_enable = ctrl[0];
 
+    // CTRL[7:4] are architecturally reserved.
+    wire _unused_ctrl_reserved = 1'b0 && &{1'b0, ctrl_data[7:4]};
+
     assign cfg_valid =
         (prop_seg   >= 5'd1) && (prop_seg   <= 5'd8) &&
         (phase1_seg >= 5'd1) && (phase1_seg <= 5'd8) &&
@@ -165,7 +168,7 @@ module proto_can_timing (
         else
             negative_error_mag = 6'd0;
 
-        if (positive_error_mag > sjw)
+        if (positive_error_mag > {1'b0, sjw})
             positive_adjust = sjw;
         else
             positive_adjust = positive_error_mag[4:0];
@@ -175,7 +178,7 @@ module proto_can_timing (
         else
             phase2_short_limit = 6'd0;
 
-        if (negative_error_mag > sjw)
+        if (negative_error_mag > {1'b0, sjw})
             negative_adjust = sjw;
         else
             negative_adjust = negative_error_mag[4:0];

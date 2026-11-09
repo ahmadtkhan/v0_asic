@@ -39,6 +39,7 @@ module proto_crc_lfsr (
 );
 
     reg [4:0]  width_m1;
+    wire _unused_ctrl_reserved = 1'b0 && ctrl_data[5];
     reg        lsb_first;
     reg        reflect_out;
     reg [31:0] polynomial;
@@ -92,11 +93,15 @@ module proto_crc_lfsr (
         input [31:0] value;
         input [4:0]  wm1;
         integer i;
+        integer src_index;
         begin
             reflect_active = 32'h0000_0000;
+            src_index = 0;
             for (i = 0; i < 32; i = i + 1) begin
-                if (i <= wm1)
-                    reflect_active[i] = value[wm1 - i];
+                if (i <= {27'd0, wm1}) begin
+                    src_index = {27'd0, wm1} - i;
+                    reflect_active[i] = value[src_index];
+                end
             end
         end
     endfunction
