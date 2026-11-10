@@ -68,39 +68,56 @@ module proto_can_timing (
     reg [3:0] ctrl;
     reg [7:0] arb_bits_m1;
 
-    wire [4:0] prop_seg;
-    wire [4:0] phase1_seg;
-    wire [4:0] phase2_seg;
-    wire [4:0] sjw;
-    wire [5:0] nominal_sample_index;
-    wire [5:0] nominal_end_index;
-    wire [5:0] total_tq;
+    // Raw/staged timing fields are written by CAN_BRP/CAN_SEG1/CAN_SEG2.
+    // They are intentionally NOT used directly by the running timing datapath.
+    // CAN_CTRL acts as a configuration commit: it snapshots the derived values
+    // below into short, dedicated runtime registers.  This removes the former
+    // long phase1_m1 -> arithmetic/comparison -> STREAM/DMEM combinational cone.
 
-    assign prop_seg   = {1'b0, prop_m1}   + 5'd1;
-    assign phase1_seg = {1'b0, phase1_m1} + 5'd1;
-    assign phase2_seg = {1'b0, phase2_m2} + 5'd2;
-    assign sjw        = {1'b0, sjw_m1}    + 5'd1;
+    wire [4:0] staged_prop_seg;
+    wire [4:0] staged_phase1_seg;
+    wire [4:0] staged_phase2_seg;
+    wire [4:0] staged_sjw;
+    wire [5:0] staged_sample_index;
+    wire [5:0] staged_end_index;
+    wire [5:0] staged_total_tq;
+    wire       staged_cfg_valid;
+
+    assign staged_prop_seg    = {1'b0, prop_m1}   + 5'd1;
+    assign staged_phase1_seg  = {1'b0, phase1_m1} + 5'd1;
+    assign staged_phase2_seg  = {1'b0, phase2_m2} + 5'd2;
+    assign staged_sjw         = {1'b0, sjw_m1}    + 5'd1;
 
     // 0-based TQ index:
-    // 0 is SYNC_SEG.  Sample occurs after PROP + PH1.  Bit end occurs after
+    // 0 is SYNC_SEG. Sample occurs after PROP + PH1. Bit end occurs after
     // PROP + PH1 + PH2.
-    assign nominal_sample_index = prop_seg + phase1_seg;
-    assign nominal_end_index    = prop_seg + phase1_seg + phase2_seg;
-    assign total_tq             = nominal_end_index + 6'd1;
+    assign staged_sample_index = staged_prop_seg + staged_phase1_seg;
+    assign staged_end_index    = staged_prop_seg + staged_phase1_seg +
+                                 staged_phase2_seg;
+    assign staged_total_tq     = staged_end_index + 6'd1;
+
+    assign staged_cfg_valid =
+        (staged_prop_seg   >= 5'd1) && (staged_prop_seg   <= 5'd8) &&
+        (staged_phase1_seg >= 5'd1) && (staged_phase1_seg <= 5'd8) &&
+        (staged_phase2_seg >= 5'd2) && (staged_phase2_seg <= 5'd8) &&
+        (staged_sjw        >= 5'd1) && (staged_sjw        <= 5'd4) &&
+        (staged_sjw <= staged_phase1_seg) &&
+        (staged_sjw <= staged_phase2_seg) &&
+        (staged_total_tq >= 6'd8) && (staged_total_tq <= 6'd25);
+
+    // Runtime timing snapshot. These registers are updated only by CAN_CTRL.
+    reg [7:0] brp_active_m1;
+    reg [5:0] nominal_sample_index_r;
+    reg [5:0] nominal_end_index_r;
+    reg [4:0] phase2_seg_r;
+    reg [4:0] sjw_r;
+    reg       cfg_valid_r;
 
     assign can_enable = ctrl[0];
+    assign cfg_valid  = cfg_valid_r;
 
     // CTRL[7:4] are architecturally reserved.
     wire _unused_ctrl_reserved = 1'b0 && &{1'b0, ctrl_data[7:4]};
-
-    assign cfg_valid =
-        (prop_seg   >= 5'd1) && (prop_seg   <= 5'd8) &&
-        (phase1_seg >= 5'd1) && (phase1_seg <= 5'd8) &&
-        (phase2_seg >= 5'd2) && (phase2_seg <= 5'd8) &&
-        (sjw        >= 5'd1) && (sjw        <= 5'd4) &&
-        (sjw <= phase1_seg) &&
-        (sjw <= phase2_seg) &&
-        (total_tq >= 6'd8) && (total_tq <= 6'd25);
 
     reg       active;
     reg       synced;
@@ -120,15 +137,15 @@ module proto_can_timing (
     reg arbitration_lost;
 
     wire tq_expire;
-    assign tq_expire = active && (brp_count == brp_m1);
+    assign tq_expire = active && (brp_count == brp_active_m1);
 
     wire [5:0] cur_sample_index;
     wire [5:0] cur_end_index;
 
     assign cur_sample_index =
-        nominal_sample_index + {1'b0, phase1_extend};
+        nominal_sample_index_r + {1'b0, phase1_extend};
     assign cur_end_index =
-        nominal_end_index + {1'b0, phase1_extend} - {1'b0, phase2_shorten};
+        nominal_end_index_r + {1'b0, phase1_extend} - {1'b0, phase2_shorten};
 
     // One synchronization is allowed between two sample points.  Only
     // recessive->dominant edges are supplied through bus_fall.
@@ -168,18 +185,18 @@ module proto_can_timing (
         else
             negative_error_mag = 6'd0;
 
-        if (positive_error_mag > {1'b0, sjw})
-            positive_adjust = sjw;
+        if (positive_error_mag > {1'b0, sjw_r})
+            positive_adjust = sjw_r;
         else
             positive_adjust = positive_error_mag[4:0];
 
-        if (phase2_seg > 5'd1)
-            phase2_short_limit = {1'b0, (phase2_seg - 5'd1)};
+        if (phase2_seg_r > 5'd1)
+            phase2_short_limit = {1'b0, (phase2_seg_r - 5'd1)};
         else
             phase2_short_limit = 6'd0;
 
-        if (negative_error_mag > {1'b0, sjw})
-            negative_adjust = sjw;
+        if (negative_error_mag > {1'b0, sjw_r})
+            negative_adjust = sjw_r;
         else
             negative_adjust = negative_error_mag[4:0];
 
@@ -241,6 +258,15 @@ module proto_can_timing (
             ctrl              <= 4'b0000;
             arb_bits_m1       <= 8'd0;
 
+            // Snapshot corresponding to reset geometry:
+            // BRP=1 clk/TQ, PROP=1, PH1=4, PH2=2, SJW=1.
+            brp_active_m1         <= 8'd0;
+            nominal_sample_index_r<= 6'd5;
+            nominal_end_index_r   <= 6'd7;
+            phase2_seg_r          <= 5'd2;
+            sjw_r                 <= 5'd1;
+            cfg_valid_r           <= 1'b1;
+
             active            <= 1'b0;
             synced            <= 1'b0;
             waiting_hard_sync <= 1'b0;
@@ -275,6 +301,15 @@ module proto_can_timing (
                 arb_bits_m1 <= arb_bits_m1_data;
 
             if (ctrl_we) begin
+                // Commit staged CAN timing. Firmware must issue CAN_CTRL again
+                // after changing BRP/SEG1/SEG2 before starting another stream.
+                brp_active_m1          <= brp_m1;
+                nominal_sample_index_r <= staged_sample_index;
+                nominal_end_index_r    <= staged_end_index;
+                phase2_seg_r           <= staged_phase2_seg;
+                sjw_r                  <= staged_sjw;
+                cfg_valid_r            <= staged_cfg_valid;
+
                 ctrl <= ctrl_data[3:0];
                 if (!ctrl_data[0]) begin
                     active            <= 1'b0;
