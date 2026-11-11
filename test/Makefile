@@ -5,6 +5,10 @@ FST ?= -fst
 TOPLEVEL_LANG ?= verilog
 
 SRC_DIR = $(PWD)/../src
+REPO_ROOT := $(abspath ..)
+
+# Make repository-level Python packages visible to cocotb.
+export PYTHONPATH := $(REPO_ROOT):$(PYTHONPATH)
 
 PROJECT_SOURCES = \
     tt_um_protocol_top.v \
