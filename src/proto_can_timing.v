@@ -2,30 +2,23 @@
 
 // CAN 2.0 nominal bit-timing engine.
 //
-// Implements the timing layer:
-//   * programmable time-quantum prescaler
-//   * SYNC_SEG fixed at 1 TQ
-//   * PROP_SEG / PHASE_SEG1 / PHASE_SEG2
-//   * sample point at the end of PHASE_SEG1
-//   * RX hard synchronization
-//   * recessive-to-dominant resynchronization
-//   * SJW-limited PHASE_SEG1 extension / PHASE_SEG2 shortening
-//   * optional arbitration-window monitoring
+// V1.2 timing-closure architecture:
+//   * CAN_BRP / CAN_SEG1 / CAN_SEG2 write staging registers.
+//   * CAN_CTRL commits the staged configuration into runtime registers.
+//   * The hot timing loop uses registered sample_target_q/end_target_q.
+//   * sample_strobe and bit_boundary are only counter/target comparisons.
+//   * Resynchronization updates the targets; it is not in the output compare
+//     path.
 //
-// Frame parsing, ACK/error-frame generation and TEC/REC confinement are not
-// implemented here.
+// CAN timing model:
+//   SYNC_SEG  = 1 TQ
+//   sample    = end of PHASE_SEG1
+//   bit end   = end of PHASE_SEG2
+//   positive phase error -> lengthen PHASE_SEG1
+//   negative phase error -> shorten PHASE_SEG2
+//   correction magnitude <= SJW
 //
-// Encoding:
-//   BRP      : clocks-per-TQ minus one, 0=>1 ... 255=>256
-//   SEG1     : [7:4]=PROP_SEG-1,   [3:0]=PHASE_SEG1-1
-//   SEG2     : [7:4]=PHASE_SEG2-2, [3:0]=SJW-1
-//   CTRL[0]  : enable
-//   CTRL[1]  : resynchronization enable
-//   CTRL[2]  : STREAM_RX waits for SOF recessive->dominant hard sync
-//   CTRL[3]  : arbitration monitor enable
-//
-// Nominal bitrate:
-//   Fbit = Fclk / ((BRP+1) * (1 + PROP + PH1 + PH2))
+// This block remains a timing layer, not a complete CAN controller.
 module proto_can_timing (
     input  wire       clk,
     input  wire       rst_n,
@@ -60,6 +53,9 @@ module proto_can_timing (
     output reg  [7:0] last_phase_error
 );
 
+    // ---------------------------------------------------------------------
+    // Staged firmware-visible configuration.
+    // ---------------------------------------------------------------------
     reg [7:0] brp_m1;
     reg [3:0] prop_m1;
     reg [3:0] phase1_m1;
@@ -67,12 +63,6 @@ module proto_can_timing (
     reg [3:0] sjw_m1;
     reg [3:0] ctrl;
     reg [7:0] arb_bits_m1;
-
-    // Raw/staged timing fields are written by CAN_BRP/CAN_SEG1/CAN_SEG2.
-    // They are intentionally NOT used directly by the running timing datapath.
-    // CAN_CTRL acts as a configuration commit: it snapshots the derived values
-    // below into short, dedicated runtime registers.  This removes the former
-    // long phase1_m1 -> arithmetic/comparison -> STREAM/DMEM combinational cone.
 
     wire [4:0] staged_prop_seg;
     wire [4:0] staged_phase1_seg;
@@ -83,18 +73,24 @@ module proto_can_timing (
     wire [5:0] staged_total_tq;
     wire       staged_cfg_valid;
 
-    assign staged_prop_seg    = {1'b0, prop_m1}   + 5'd1;
-    assign staged_phase1_seg  = {1'b0, phase1_m1} + 5'd1;
-    assign staged_phase2_seg  = {1'b0, phase2_m2} + 5'd2;
-    assign staged_sjw         = {1'b0, sjw_m1}    + 5'd1;
+    assign staged_prop_seg   = {1'b0, prop_m1}   + 5'd1;
+    assign staged_phase1_seg = {1'b0, phase1_m1} + 5'd1;
+    assign staged_phase2_seg = {1'b0, phase2_m2} + 5'd2;
+    assign staged_sjw        = {1'b0, sjw_m1}    + 5'd1;
 
-    // 0-based TQ index:
-    // 0 is SYNC_SEG. Sample occurs after PROP + PH1. Bit end occurs after
-    // PROP + PH1 + PH2.
-    assign staged_sample_index = staged_prop_seg + staged_phase1_seg;
-    assign staged_end_index    = staged_prop_seg + staged_phase1_seg +
-                                 staged_phase2_seg;
-    assign staged_total_tq     = staged_end_index + 6'd1;
+    // tq_index is 0-based:
+    //   0                  = SYNC_SEG
+    //   sample_index       = last TQ before sample point
+    //   end_index          = last TQ of the bit
+    assign staged_sample_index =
+        {1'b0, staged_prop_seg} + {1'b0, staged_phase1_seg};
+
+    assign staged_end_index =
+        {1'b0, staged_prop_seg}
+        + {1'b0, staged_phase1_seg}
+        + {1'b0, staged_phase2_seg};
+
+    assign staged_total_tq = staged_end_index + 6'd1;
 
     assign staged_cfg_valid =
         (staged_prop_seg   >= 5'd1) && (staged_prop_seg   <= 5'd8) &&
@@ -103,12 +99,18 @@ module proto_can_timing (
         (staged_sjw        >= 5'd1) && (staged_sjw        <= 5'd4) &&
         (staged_sjw <= staged_phase1_seg) &&
         (staged_sjw <= staged_phase2_seg) &&
-        (staged_total_tq >= 6'd8) && (staged_total_tq <= 6'd25);
+        (staged_total_tq >= 6'd8) &&
+        (staged_total_tq <= 6'd25);
 
-    // Runtime timing snapshot. These registers are updated only by CAN_CTRL.
+    // ---------------------------------------------------------------------
+    // Committed runtime configuration.
+    //
+    // These are the only timing-geometry values used while a stream runs.
+    // Static staging fields no longer feed the hot timing path.
+    // ---------------------------------------------------------------------
     reg [7:0] brp_active_m1;
-    reg [5:0] nominal_sample_index_r;
-    reg [5:0] nominal_end_index_r;
+    reg [4:0] nominal_sample_target;
+    reg [4:0] nominal_end_target;
     reg [4:0] phase2_seg_r;
     reg [4:0] sjw_r;
     reg       cfg_valid_r;
@@ -116,18 +118,26 @@ module proto_can_timing (
     assign can_enable = ctrl[0];
     assign cfg_valid  = cfg_valid_r;
 
-    // CTRL[7:4] are architecturally reserved.
+    // Reserved upper control bits are intentionally ignored.
     wire _unused_ctrl_reserved = 1'b0 && &{1'b0, ctrl_data[7:4]};
 
+    // ---------------------------------------------------------------------
+    // Runtime state.
+    // ---------------------------------------------------------------------
     reg       active;
     reg       synced;
     reg       waiting_hard_sync;
     reg       tx_monitor_active;
 
     reg [7:0] brp_count;
-    reg [5:0] tq_index;
-    reg [4:0] phase1_extend;
-    reg [4:0] phase2_shorten;
+    reg [4:0] tq_index;
+
+    // Absolute targets for the current bit.
+    // These replace phase1_extend / phase2_shorten.
+    reg [4:0] sample_target_q;
+    reg [4:0] end_target_q;
+
+    // CAN permits only one synchronization within one bit time.
     reg       resync_used;
 
     reg [8:0] tx_wire_index;
@@ -136,98 +146,122 @@ module proto_can_timing (
     reg hard_sync_seen;
     reg arbitration_lost;
 
+    // ---------------------------------------------------------------------
+    // Hot timing path.
+    //
+    // This is intentionally small:
+    //   BRP compare -> TQ expiry
+    //   6-bit target compare -> sample/boundary
+    // ---------------------------------------------------------------------
     wire tq_expire;
-    assign tq_expire = active && (brp_count == brp_active_m1);
+    wire bit_boundary;
 
-    wire [5:0] cur_sample_index;
-    wire [5:0] cur_end_index;
-
-    assign cur_sample_index =
-        nominal_sample_index_r + {1'b0, phase1_extend};
-    assign cur_end_index =
-        nominal_end_index_r + {1'b0, phase1_extend} - {1'b0, phase2_shorten};
-
-    // One synchronization is allowed between two sample points.  Only
-    // recessive->dominant edges are supplied through bus_fall.
-    wire resync_common;
-    assign resync_common =
-        can_enable && cfg_valid && ctrl[1] &&
-        active && synced && !waiting_hard_sync &&
-        !resync_used && bus_fall && !tx_start;
-
-    wire positive_edge;
-    wire negative_edge;
-
-    // A transmitter already driving dominant ignores a positive edge because
-    // it can simply be its own bus transition.
-    assign positive_edge =
-        resync_common &&
-        (tq_index != 6'd0) &&
-        (tq_index <= cur_sample_index) &&
-        !(tx_monitor_active && (tx_level == 1'b0));
-
-    assign negative_edge =
-        resync_common &&
-        (tq_index > cur_sample_index) &&
-        (tq_index <= cur_end_index);
-
-    reg [5:0] positive_error_mag;
-    reg [5:0] negative_error_mag;
-    reg [4:0] positive_adjust;
-    reg [4:0] negative_adjust;
-    reg [5:0] phase2_short_limit;
-
-    always @(*) begin
-        positive_error_mag = tq_index;
-
-        if (cur_end_index >= tq_index)
-            negative_error_mag = (cur_end_index - tq_index) + 6'd1;
-        else
-            negative_error_mag = 6'd0;
-
-        if (positive_error_mag > {1'b0, sjw_r})
-            positive_adjust = sjw_r;
-        else
-            positive_adjust = positive_error_mag[4:0];
-
-        if (phase2_seg_r > 5'd1)
-            phase2_short_limit = {1'b0, (phase2_seg_r - 5'd1)};
-        else
-            phase2_short_limit = 6'd0;
-
-        if (negative_error_mag > {1'b0, sjw_r})
-            negative_adjust = sjw_r;
-        else
-            negative_adjust = negative_error_mag[4:0];
-
-        if ({1'b0, negative_adjust} > phase2_short_limit)
-            negative_adjust = phase2_short_limit[4:0];
-    end
-
-    wire [5:0] sample_index_with_edge;
-    wire [5:0] end_index_with_edge;
-
-    assign sample_index_with_edge =
-        cur_sample_index + (positive_edge ? {1'b0, positive_adjust} : 6'd0);
-
-    assign end_index_with_edge =
-        cur_end_index
-        + (positive_edge ? {1'b0, positive_adjust} : 6'd0)
-        - (negative_edge ? {1'b0, negative_adjust} : 6'd0);
+    assign tq_expire =
+        active && (brp_count == brp_active_m1);
 
     assign sample_strobe =
-        tq_expire && (tq_index == sample_index_with_edge);
+        tq_expire && (tq_index == sample_target_q);
 
-    wire bit_boundary;
     assign bit_boundary =
-        tq_expire && (tq_index == end_index_with_edge);
+        tq_expire && (tq_index == end_target_q);
 
-    // tx_start is the synthetic first boundary.  proto_stream raises it only
-    // after the first DMEM byte has been fetched.
+    // tx_start is a synthetic first bit boundary. proto_stream already has
+    // the first transmit byte available when it raises tx_start.
     assign bit_tick =
         (tx_start && can_enable && cfg_valid) || bit_boundary;
 
-    // CAN arbitration loss: transmit recessive, sample dominant.
+    // ---------------------------------------------------------------------
+    // Resynchronization event classification.
+    //
+    // Resynchronization arithmetic only feeds the target registers.  It is
+    // deliberately not part of sample_strobe / bit_boundary.
+    //
+    // Edges exactly on sample_target_q or end_target_q are treated as zero
+    // phase error in this whole-TQ digital model and do not cause correction.
+    // ---------------------------------------------------------------------
+    wire resync_common;
+    wire positive_edge;
+    wire negative_edge;
+
+    assign resync_common =
+        can_enable &&
+        cfg_valid &&
+        ctrl[1] &&
+        active &&
+        synced &&
+        !waiting_hard_sync &&
+        !resync_used &&
+        bus_fall &&
+        sampled_bit &&
+        !tx_start;
+
+    // Positive phase error: edge is late relative to SYNC and before sample.
+    // A transmitter already driving dominant ignores this positive edge.
+    assign positive_edge =
+        resync_common &&
+        (tq_index != 5'd0) &&
+        (tq_index < sample_target_q) &&
+        !(tx_monitor_active && (tx_level == 1'b0));
+
+    // Negative phase error: edge is after the sample point but before bit end.
+    assign negative_edge =
+        resync_common &&
+        (tq_index > sample_target_q) &&
+        (tq_index < end_target_q);
+
+    reg [4:0] positive_error_mag;
+    reg [4:0] negative_error_mag;
+    reg [4:0] negative_future_room;
+    reg [4:0] phase2_short_limit;
+    reg [4:0] positive_adjust;
+    reg [4:0] negative_adjust;
+
+    always @(*) begin
+        // Positive error is measured from the expected SYNC position.
+        positive_error_mag = tq_index;
+
+        // Negative error is the distance from the observed edge to the
+        // currently scheduled bit end. No +1 is used: an edge one TQ before
+        // bit end has a magnitude of exactly one TQ.
+        if (end_target_q > tq_index)
+            negative_error_mag = end_target_q - tq_index;
+        else
+            negative_error_mag = 5'd0;
+
+        // If the edge is being processed on a TQ-expiry clock, tq_index will
+        // advance on this same clock edge. Keep the new end target at or ahead
+        // of that next index so the boundary cannot be moved behind the
+        // counter and missed.
+        negative_future_room = negative_error_mag;
+        if (tq_expire && (negative_future_room != 5'd0))
+            negative_future_room = negative_future_room - 5'd1;
+
+        // Preserve at least one TQ of PHASE_SEG2 after shortening.
+        if (phase2_seg_r > 5'd1)
+            phase2_short_limit = phase2_seg_r - 5'd1;
+        else
+            phase2_short_limit = 5'd0;
+
+        if (positive_error_mag > sjw_r)
+            positive_adjust = sjw_r;
+        else
+            positive_adjust = positive_error_mag;
+
+        if (negative_error_mag > sjw_r)
+            negative_adjust = sjw_r;
+        else
+            negative_adjust = negative_error_mag;
+
+        if (negative_adjust > phase2_short_limit)
+            negative_adjust = phase2_short_limit;
+
+        if (negative_adjust > negative_future_room)
+            negative_adjust = negative_future_room;
+    end
+
+    // ---------------------------------------------------------------------
+    // Arbitration monitor.
+    // ---------------------------------------------------------------------
     assign arbitration_lost_now =
         sample_strobe &&
         tx_monitor_active &&
@@ -247,22 +281,27 @@ module proto_can_timing (
         active               // [0]
     };
 
+    // ---------------------------------------------------------------------
+    // Sequential state.
+    // ---------------------------------------------------------------------
     always @(posedge clk) begin
         if (!rst_n) begin
-            // Valid reset geometry: 8 TQ/bit, sample point 75%.
-            brp_m1            <= 8'd0; // 1 clk/TQ
-            prop_m1           <= 4'd0; // 1 TQ
-            phase1_m1         <= 4'd3; // 4 TQ
-            phase2_m2         <= 4'd0; // 2 TQ
-            sjw_m1            <= 4'd0; // 1 TQ
-            ctrl              <= 4'b0000;
-            arb_bits_m1       <= 8'd0;
+            // Staged reset geometry:
+            // clocks/TQ=1, PROP=1, PH1=4, PH2=2, SJW=1.
+            brp_m1      <= 8'd0;
+            prop_m1     <= 4'd0;
+            phase1_m1   <= 4'd3;
+            phase2_m2   <= 4'd0;
+            sjw_m1      <= 4'd0;
+            ctrl        <= 4'b0000;
+            arb_bits_m1 <= 8'd0;
 
-            // Snapshot corresponding to reset geometry:
-            // BRP=1 clk/TQ, PROP=1, PH1=4, PH2=2, SJW=1.
-            brp_active_m1         <= 8'd0;
-            nominal_sample_index_r<= 6'd5;
-            nominal_end_index_r   <= 6'd7;
+            // Matching committed reset geometry:
+            // sample target = 1 + 4 = 5
+            // end target    = 1 + 4 + 2 = 7
+            brp_active_m1       <= 8'd0;
+            nominal_sample_target <= 5'd5;
+            nominal_end_target    <= 5'd7;
             phase2_seg_r          <= 5'd2;
             sjw_r                 <= 5'd1;
             cfg_valid_r           <= 1'b1;
@@ -271,19 +310,23 @@ module proto_can_timing (
             synced            <= 1'b0;
             waiting_hard_sync <= 1'b0;
             tx_monitor_active <= 1'b0;
-            brp_count         <= 8'd0;
-            tq_index          <= 6'd0;
-            phase1_extend     <= 5'd0;
-            phase2_shorten    <= 5'd0;
-            resync_used       <= 1'b0;
-            tx_wire_index     <= 9'd0;
 
-            sampled_bit       <= 1'b1;
-            resync_seen       <= 1'b0;
-            hard_sync_seen    <= 1'b0;
-            arbitration_lost  <= 1'b0;
-            last_phase_error  <= 8'h00;
+            brp_count       <= 8'd0;
+            tq_index        <= 5'd0;
+            sample_target_q <= 5'd5;
+            end_target_q    <= 5'd7;
+            resync_used     <= 1'b0;
+            tx_wire_index   <= 9'd0;
+
+            sampled_bit      <= 1'b1;
+            resync_seen      <= 1'b0;
+            hard_sync_seen   <= 1'b0;
+            arbitration_lost <= 1'b0;
+            last_phase_error <= 8'h00;
         end else begin
+            // -------------------------------------------------------------
+            // Staging-register writes.
+            // -------------------------------------------------------------
             if (brp_we)
                 brp_m1 <= brp_data;
 
@@ -300,24 +343,28 @@ module proto_can_timing (
             if (arb_we)
                 arb_bits_m1 <= arb_bits_m1_data;
 
+            // CAN_CTRL is the configuration commit point.
             if (ctrl_we) begin
-                // Commit staged CAN timing. Firmware must issue CAN_CTRL again
-                // after changing BRP/SEG1/SEG2 before starting another stream.
-                brp_active_m1          <= brp_m1;
-                nominal_sample_index_r <= staged_sample_index;
-                nominal_end_index_r    <= staged_end_index;
-                phase2_seg_r           <= staged_phase2_seg;
-                sjw_r                  <= staged_sjw;
-                cfg_valid_r            <= staged_cfg_valid;
+                brp_active_m1        <= brp_m1;
+                nominal_sample_target <= staged_sample_index[4:0];
+                nominal_end_target    <= staged_end_index[4:0];
+                phase2_seg_r          <= staged_phase2_seg;
+                sjw_r                 <= staged_sjw;
+                cfg_valid_r           <= staged_cfg_valid;
+                ctrl                  <= ctrl_data[3:0];
 
-                ctrl <= ctrl_data[3:0];
+                // Also prime current targets with the committed geometry.
+                sample_target_q <= staged_sample_index[4:0];
+                end_target_q    <= staged_end_index[4:0];
+
                 if (!ctrl_data[0]) begin
                     active            <= 1'b0;
                     synced            <= 1'b0;
                     waiting_hard_sync <= 1'b0;
                     tx_monitor_active <= 1'b0;
                     brp_count         <= 8'd0;
-                    tq_index          <= 6'd0;
+                    tq_index          <= 5'd0;
+                    resync_used       <= 1'b0;
                 end
             end
 
@@ -328,108 +375,133 @@ module proto_can_timing (
                 last_phase_error <= 8'h00;
             end
 
-            if (sample_strobe) begin
+            if (sample_strobe)
                 sampled_bit <= bus_level;
-                resync_used <= 1'b0;
-            end
 
             if (arbitration_lost_now) begin
                 arbitration_lost  <= 1'b1;
                 tx_monitor_active <= 1'b0;
             end
 
+            // -------------------------------------------------------------
+            // Timing-engine lifecycle.
+            // Priority: stop > TX start > RX hard sync > RX arm > run.
+            // -------------------------------------------------------------
             if (stream_stop) begin
                 active            <= 1'b0;
                 synced            <= 1'b0;
                 waiting_hard_sync <= 1'b0;
                 tx_monitor_active <= 1'b0;
-                brp_count         <= 8'd0;
-                tq_index          <= 6'd0;
-                phase1_extend     <= 5'd0;
-                phase2_shorten    <= 5'd0;
-                resync_used       <= 1'b0;
-            end
 
-            // TX starts on a local bit boundary.
-            if (tx_start && can_enable && cfg_valid) begin
+                brp_count       <= 8'd0;
+                tq_index        <= 5'd0;
+                sample_target_q <= nominal_sample_target;
+                end_target_q    <= nominal_end_target;
+                resync_used     <= 1'b0;
+            end else if (tx_start && can_enable && cfg_valid) begin
                 active            <= 1'b1;
                 synced            <= 1'b1;
                 waiting_hard_sync <= 1'b0;
                 tx_monitor_active <= 1'b1;
-                brp_count         <= 8'd0;
-                tq_index          <= 6'd0;
-                phase1_extend     <= 5'd0;
-                phase2_shorten    <= 5'd0;
-                resync_used       <= 1'b0;
-                tx_wire_index     <= 9'd0;
+
+                brp_count       <= 8'd0;
+                tq_index        <= 5'd0;
+                sample_target_q <= nominal_sample_target;
+                end_target_q    <= nominal_end_target;
+                resync_used     <= 1'b0;
+                tx_wire_index   <= 9'd0;
+            end else if (
+                can_enable &&
+                cfg_valid &&
+                bus_fall &&
+                (waiting_hard_sync || (rx_start && ctrl[2]))
+            ) begin
+                // Hard synchronization: restart the bit time at SOF.
+                active            <= 1'b1;
+                synced            <= 1'b1;
+                waiting_hard_sync <= 1'b0;
+                tx_monitor_active <= 1'b0;
+
+                brp_count       <= 8'd0;
+                tq_index        <= 5'd0;
+                sample_target_q <= nominal_sample_target;
+                end_target_q    <= nominal_end_target;
+
+                // Hard sync consumes the synchronization opportunity for this
+                // bit. It is cleared at the next bit boundary.
+                resync_used      <= 1'b1;
+                tx_wire_index    <= 9'd0;
+                hard_sync_seen   <= 1'b1;
+                last_phase_error <= 8'h00;
             end else if (rx_start && can_enable && cfg_valid) begin
                 tx_monitor_active <= 1'b0;
-                phase1_extend     <= 5'd0;
-                phase2_shorten    <= 5'd0;
-                resync_used       <= 1'b0;
                 tx_wire_index     <= 9'd0;
+
+                brp_count       <= 8'd0;
+                tq_index        <= 5'd0;
+                sample_target_q <= nominal_sample_target;
+                end_target_q    <= nominal_end_target;
+                resync_used     <= 1'b0;
 
                 if (ctrl[2]) begin
                     active            <= 1'b0;
                     synced            <= 1'b0;
                     waiting_hard_sync <= 1'b1;
-                    brp_count         <= 8'd0;
-                    tq_index          <= 6'd0;
                 end else begin
                     active            <= 1'b1;
                     synced            <= 1'b1;
                     waiting_hard_sync <= 1'b0;
-                    brp_count         <= 8'd0;
-                    tq_index          <= 6'd0;
                 end
-            end
-
-            // SOF hard sync.
-            if (can_enable && cfg_valid && bus_fall &&
-                (waiting_hard_sync || (rx_start && ctrl[2]))) begin
-                active            <= 1'b1;
-                synced            <= 1'b1;
-                waiting_hard_sync <= 1'b0;
-                brp_count         <= 8'd0;
-                tq_index          <= 6'd0;
-                phase1_extend     <= 5'd0;
-                phase2_shorten    <= 5'd0;
-                resync_used       <= 1'b0;
-                hard_sync_seen    <= 1'b1;
-                last_phase_error  <= 8'h00;
-            end else if (active && can_enable && cfg_valid &&
-                         !stream_stop && !tx_start) begin
+            end else if (active && can_enable && cfg_valid) begin
+                // ---------------------------------------------------------
+                // Base TQ progression.
+                // ---------------------------------------------------------
                 if (tq_expire) begin
                     brp_count <= 8'd0;
 
                     if (bit_boundary) begin
-                        tq_index       <= 6'd0;
-                        phase1_extend  <= 5'd0;
-                        phase2_shorten <= 5'd0;
+                        tq_index        <= 5'd0;
+                        sample_target_q <= nominal_sample_target;
+                        end_target_q    <= nominal_end_target;
+
+                        // Exactly one synchronization is permitted per bit.
+                        resync_used <= 1'b0;
 
                         if (tx_monitor_active)
                             tx_wire_index <= tx_wire_index + 1'b1;
                     end else begin
-                        tq_index <= tq_index + 1'b1;
+                        tq_index <= tq_index + 5'd1;
                     end
                 end else begin
                     brp_count <= brp_count + 1'b1;
                 end
 
+                // ---------------------------------------------------------
+                // Resynchronization target updates.
+                //
+                // These register writes do not feed the current-cycle
+                // sample_strobe or bit_boundary combinationally.
+                // ---------------------------------------------------------
                 if (positive_edge) begin
-                    // If an adjustment itself creates a boundary, the boundary
-                    // reset above owns the next-bit segment state.
-                    if (!bit_boundary)
-                        phase1_extend <= phase1_extend + positive_adjust;
+                    sample_target_q <=
+                        sample_target_q + positive_adjust;
+                    end_target_q <=
+                        end_target_q + positive_adjust;
+
                     resync_used      <= 1'b1;
                     resync_seen      <= 1'b1;
-                    last_phase_error <= {2'b00, positive_error_mag};
+                    last_phase_error <= {3'b000, positive_error_mag};
                 end else if (negative_edge) begin
-                    if (!bit_boundary)
-                        phase2_shorten <= phase2_shorten + negative_adjust;
-                    resync_used       <= 1'b1;
-                    resync_seen       <= 1'b1;
-                    last_phase_error  <= (~{2'b00, negative_error_mag}) + 1'b1;
+                    if (negative_adjust != 5'd0)
+                        end_target_q <=
+                            end_target_q - negative_adjust;
+
+                    resync_used <= 1'b1;
+                    resync_seen <= 1'b1;
+
+                    // Two's-complement signed whole-TQ phase error.
+                    last_phase_error <=
+                        (~{3'b000, negative_error_mag}) + 8'd1;
                 end
             end
         end
